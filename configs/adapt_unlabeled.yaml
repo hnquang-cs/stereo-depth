@@ -1,0 +1,91 @@
+# Stage 3: adapt a trained checkpoint to your own unlabeled stereo camera.
+#
+# Your dataset needs nothing but images:
+#   my_camera/
+#     left/   000001.png ...
+#     right/  000001.png ...
+#   (optional) calib.txt or calib.json for metric depth
+#
+#   python train.py --config configs/adapt_unlabeled.yaml --init outputs/train_unlabeled/best.pt
+#
+# Differences from train_unlabeled.yaml, and why:
+#   * 10x smaller learning rate      - the features are already good; this is a
+#                                      domain shift, not a fresh optimisation.
+#   * teacher starts at epoch 2      - the model is already usable, so the
+#                                      pseudo-label stage does not need a long warm-up.
+#   * milder geometric augmentation  - the target camera has one fixed geometry.
+#   * photometric augmentation kept  - lighting varies within the target domain.
+
+dynamic_disparity: true
+
+model:
+  downsample: 4
+  feature_channels: 16
+  backbone_width: 16
+  max_disparities_cap: 384
+
+data:
+  train:
+    - type: folder
+      root: datasets/my_camera
+      enabled: true
+      weight: 1.0
+  validation:
+    - type: folder
+      root: datasets/my_camera_val
+      enabled: false
+      weight: 1.0
+
+  resize:
+    height: 384
+    width: 640
+
+  photometric_augmentation:
+    enabled: true
+    brightness: 0.15
+    contrast: 0.15
+    saturation: 0.15
+    hue: 0.02
+    probability: 0.5
+    asymmetric_probability: 0.0
+
+  geometric_augmentation:
+    enabled: true
+    scale: [0.9, 1.1]
+    aspect: [0.95, 1.05]
+
+loss:
+  photometric: 1.0
+  smoothness: 0.1
+  left_right: 0.5
+  pseudo: 1.0
+  confidence: 0.05
+  low_resolution: 0.5
+
+teacher:
+  enabled: true
+  start_epoch: 2
+  ema_decay: 0.999
+  ramp_epochs: 5
+  filter:
+    confidence_threshold: 0.5
+    lr_threshold: 1.0
+    photometric_threshold: 0.15
+
+optimizer:
+  name: adam
+  learning_rate: 0.00001
+  schedule: poly
+  poly_exponent: 0.9
+  warmup_iterations: 200
+  grad_clip: 1.0
+
+training:
+  epochs: 30
+  batch_size: 4
+  num_workers: 4
+  use_amp: true
+  seed: 1234
+  warmup_iterations: 50
+  output_dir: outputs/adapt_unlabeled
+  selection_metric: val/photometric

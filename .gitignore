@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+venv/
+.venv/
+
+# Data and training artefacts are never committed.
+datasets/
+outputs/
+checkpoints/
+*.pt
+*.ckpt
+*.onnx
+*.npz
+*.npy
+wandb/
+.DS_Store

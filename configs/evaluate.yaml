@@ -1,0 +1,34 @@
+# Stage 4: frozen ground-truth benchmark evaluation.
+#
+# GROUND TRUTH IS USED HERE, AND ONLY HERE. No optimiser is constructed.
+#
+#   python evaluate.py --checkpoint outputs/train_unlabeled/best.pt \
+#                      --protocol sceneflow --dataset-root datasets/sceneflow --both
+#
+# Protocols (stereo/evaluation/protocols.py holds the full definitions):
+#
+#   sceneflow                  paper Table IV. EPE and %Bad(1.0), global per-pixel
+#                              aggregation, valid mask d_gt in (1e-3, 251).
+#                              Published reference: EPE 0.936, %Bad(1.0) 10.0.
+#   sceneflow_literature_mask  same metrics with the d_gt < 192 mask other methods use.
+#   middlebury2014             paper Table V metric set (bad2/bad4/avgerr/rms/A90/A95,
+#                              nonocc and all) -- but on the TRAINING split, because
+#                              the test ground truth is not public.
+#   eth3d, kitti2015, kitti2012, custom_folder   secondary benchmarks.
+#
+# Post-processing: the paper's tables use the RAW network output, so postprocess
+# is off by default.  --both writes a raw and a post-processed run side by side.
+
+evaluation:
+  protocol: sceneflow
+  dataset_root: datasets/sceneflow
+  checkpoint: outputs/train_unlabeled/best.pt
+  output_dir: outputs/evaluation
+  max_samples: null
+  save_visualizations: 8
+
+  postprocess:
+    enabled: false
+    confidence_threshold: 0.25   # the paper's exp(matchability) threshold
+    min_region_pixels: 2000      # the paper's minimum depth-region size
+    region_disparity_tolerance: 1.0   # NOT specified by the paper; our assumption

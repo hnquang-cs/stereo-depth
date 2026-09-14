@@ -1,0 +1,132 @@
+# Stage 1 + Stage 2: label-free self-supervised stereo with EMA teacher/student.
+#
+# NO GROUND-TRUTH DISPARITY OR DEPTH IS READ BY THIS CONFIGURATION.
+# The benchmark datasets below contribute their left/right images only; the
+# dataset objects are constructed in DatasetMode.TRAIN, which cannot open a
+# ground-truth file (stereo/data/base.py).
+#
+# Every number here is a starting point, not a tuned value.
+
+# num_disparities is recomputed from data.resize.width by min(width // 2, 384),
+# floored to a multiple of `downsample`.  640 -> 320.
+dynamic_disparity: true
+
+model:
+  downsample: 4            # cost volume at 1/4 resolution (the paper's low-res variant)
+  feature_channels: 16     # the paper's 16-dimensional matching features
+  backbone_width: 16
+  cost_volume_channels: 4
+  max_disparities_cap: 384
+
+data:
+  # Sampling weights are per-draw probabilities, so a 15-scene dataset can sit
+  # next to a 20000-frame one without being drowned out.
+  #
+  # Defaults reasoned from dataset size and diversity:
+  #   Scene Flow  ~22k frames, synthetic, huge variety -> the bulk of the signal
+  #   KITTI 2015    200 frames + 200 unlabeled test pairs, outdoor, real optics
+  #   KITTI 2012    194 frames, outdoor
+  #   Middlebury     15 scenes, indoor, high resolution, very few samples
+  #   ETH3D          27 scenes, indoor+outdoor, sparse
+  # Small real datasets get weights well above their size share on purpose: the
+  # target domain is real indoor imagery, and photometric training benefits from
+  # real sensor noise and lighting that synthetic renders do not have.
+  train:
+    - type: sceneflow
+      root: datasets/sceneflow
+      enabled: true
+      weight: 0.45
+      options: {split: TRAIN}
+    - type: kitti
+      root: datasets/kitti2015/training
+      enabled: false
+      weight: 0.15
+      options: {version: "2015", reference_frames_only: false}
+    - type: kitti
+      root: datasets/kitti2012/training
+      enabled: false
+      weight: 0.10
+      options: {version: "2012", reference_frames_only: false}
+    - type: middlebury
+      root: datasets/middlebury/MiddEval3/trainingH
+      enabled: false
+      weight: 0.20
+    - type: eth3d
+      root: datasets/eth3d/two_view_training
+      enabled: false
+      weight: 0.10
+
+  # Label-free validation: images only, no augmentation. Used for checkpoint
+  # selection via the photometric reconstruction loss.
+  validation:
+    - type: sceneflow
+      root: datasets/sceneflow
+      enabled: true
+      weight: 1.0
+      fraction: 0.02
+      options: {split: TEST}
+
+  resize:
+    height: 384
+    width: 640
+
+  photometric_augmentation:
+    enabled: true
+    brightness: 0.2
+    contrast: 0.2
+    saturation: 0.2
+    hue: 0.02
+    gamma: [0.8, 1.2]
+    probability: 0.5
+    # Independent per-view jitter breaks brightness constancy; off by default.
+    asymmetric_probability: 0.0
+
+  geometric_augmentation:
+    enabled: true
+    scale: [0.8, 1.2]
+    aspect: [0.9, 1.1]
+    size_divisor: 16
+    # There is no crop option. Random cropping is not used anywhere.
+
+loss:
+  photometric: 1.0
+  smoothness: 0.1
+  left_right: 0.5
+  pseudo: 1.0
+  confidence: 0.05      # label-free matchability target; set 0.0 to disable
+  low_resolution: 0.5   # the same photometric/smoothness terms on the soft-argmin output
+
+teacher:
+  enabled: true
+  start_epoch: 10
+  ema_decay: 0.999
+  ramp_epochs: 10
+  filter:
+    confidence_threshold: 0.5
+    lr_threshold: 1.0
+    photometric_threshold: 0.15
+    use_confidence: true
+    use_lr: true
+    use_photometric: true
+  min_valid_ratio: 0.05
+  max_valid_ratio: 0.98
+
+optimizer:
+  name: adam
+  learning_rate: 0.0001
+  weight_decay: 0.0
+  schedule: poly
+  poly_exponent: 0.9
+  warmup_iterations: 500
+  grad_clip: 1.0
+
+training:
+  epochs: 100
+  batch_size: 4
+  num_workers: 4
+  use_amp: true
+  seed: 1234
+  warmup_iterations: 200    # photometric-only before consistency/confidence switch on
+  log_every: 20
+  output_dir: outputs/train_unlabeled
+  selection_metric: val/photometric   # LABEL-FREE checkpoint selection

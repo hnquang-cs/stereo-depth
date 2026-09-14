@@ -1,0 +1,9 @@
+# Core. Plain PyTorch -- no PyTorch Lightning, no Hydra, no MMCV.
+torch>=2.0
+numpy>=1.21
+opencv-python-headless>=4.5   # image and 16-bit PNG IO (use opencv-python for GUI display)
+PyYAML>=5.4
+matplotlib>=3.5               # visualisation only
+
+# Testing
+pytest>=7.0
