@@ -45,10 +45,16 @@ def load_reference(num_disparities, downsample, features, backbone):
 
     if MMSTEREO_PATH not in sys.path:
         sys.path.insert(0, MMSTEREO_PATH)
+    # Never write __pycache__ into the reference repository: this test reads it,
+    # it must not modify it.
+    previous = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
     try:
         from models.hdrn_alpha_stereo import hdrn_alpha_stereo
     except Exception as error:                                   # pragma: no cover
         pytest.skip(f"could not import the reference model: {error}")
+    finally:
+        sys.dont_write_bytecode = previous
 
     hparams = types.SimpleNamespace(num_disparities=num_disparities,
                                     downsample_factor=downsample,
@@ -101,7 +107,12 @@ def test_cost_volume_matches_the_reference_indexing():
         pytest.skip(f"reference implementation not found at {MMSTEREO_PATH}")
     if MMSTEREO_PATH not in sys.path:
         sys.path.insert(0, MMSTEREO_PATH)
-    from layers.cost_volume import cost_volume as reference_cost_volume
+    previous = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        from layers.cost_volume import cost_volume as reference_cost_volume
+    finally:
+        sys.dont_write_bytecode = previous
 
     from stereo.geometry import flip_lr
     from stereo.model import correlation_volume
