@@ -6,7 +6,7 @@ import torch
 from stereo.losses import (ConfidenceLoss, LeftRightConsistencyLoss, PhotometricLoss,
                            PseudoLabelFilterConfig, PseudoLabelLoss, SmoothnessLoss,
                            build_pseudo_label_mask, occlusion_mask, ssim)
-from tests.test_geometry import make_shifted_pair
+from tests.helpers import make_shifted_pair
 
 
 def test_ssim_of_identical_images_is_one():

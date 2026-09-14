@@ -11,20 +11,7 @@ import torch
 from stereo.geometry import (compute_num_disparities, depth_to_disparity, disparity_to_depth,
                              flip_lr, left_right_difference, pad_to_multiple, resize_disparity,
                              scale_disparity, unpad, warp_left_to_right, warp_right_to_left)
-
-
-def make_shifted_pair(height=16, width=64, shift=7, seed=0):
-    """Left/right pair related by an exact integer horizontal shift.
-
-    Building the right image as ``I_R(x) = I_L(x + d)`` makes the left-referenced
-    disparity exactly ``d``: the left pixel ``x`` matches the right pixel
-    ``x - d`` because ``I_R(x - d) = I_L(x - d + d) = I_L(x)``.
-    """
-    generator = torch.Generator().manual_seed(seed)
-    texture = torch.rand((1, 3, height, width + shift), generator=generator)
-    left = texture[..., :width]
-    right = texture[..., shift:shift + width]
-    return left, right
+from tests.helpers import make_shifted_pair
 
 
 def test_disparity_sign_convention_left():
