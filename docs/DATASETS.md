@@ -21,6 +21,8 @@ and `--delete-archives` removes them after extraction.
 | KITTI 2012 | yes | 2.0 GB | no | – |
 | Scene Flow FlyingThings3D | yes, but 138 GB | 45 GB + 93 GB | no | – |
 
+On Kaggle, **attach Scene Flow rather than downloading it** — see *Scene Flow on Kaggle* below.
+
 ## What each download gives you
 
 ### Middlebury 2014 — `python -m stereo.data.download middlebury`
@@ -61,7 +63,37 @@ https://s3.eu-central-1.amazonaws.com/avg-kitti/data_stereo_flow.zip  (1.9 GB)
 ```
 Gives `training/{colored_0,colored_1,disp_occ,disp_noc,calib}`.
 
-### Scene Flow FlyingThings3D — `python -m stereo.data.download sceneflow`
+### Scene Flow on Kaggle — attach, do not download
+
+Scene Flow is 132 GB, well past Kaggle's 20 GB working-directory quota. Attach a community
+mirror as an input dataset instead and tell the notebook where it is:
+
+```python
+DATASETS = {"sceneflow": 1.0}                        # Control Panel
+ATTACHED = {"sceneflow": "/kaggle/input/sceneflow"}  # path from Add Data
+```
+
+**The mirror's internal layout does not matter.** `stereo.data.sceneflow.discover_sceneflow()`
+searches the attached directory up to 5 levels deep for either recognised structure:
+
+| Layout | Looks like |
+|---|---|
+| `official` | `frames_finalpass/TRAIN/<A\|B\|C>/<scene>/left/*.png` + `disparity/TRAIN/...` |
+| `subset` | `train/image_clean/left/*.png` + `train/disparity/left/*.pfm` |
+
+It falls back to `frames_cleanpass` when there is no `frames_finalpass`, and maps the `TEST`
+split onto the subset release's `val` directory. Mirrors commonly wrap everything in an extra
+folder (`sceneflow/FlyingThings3D/...`); that is handled.
+
+An **images-only mirror is fine for training** — training here is label-free. Disparity is
+only needed to benchmark, and `SceneFlowDataset` raises a clear error naming the problem if
+you try to benchmark against a copy that has none.
+
+If a mirror is not recognised, the error prints that mirror's actual directory tree so it can
+be reported rather than guessed at. Outside Kaggle, the same auto-discovery works on a
+manually staged copy, so `root` can point anywhere sensible.
+
+### Scene Flow by direct download (not on Kaggle) — `python -m stereo.data.download sceneflow`
 ```
 .../FlyingThings3D/raw_data/flyingthings3d__frames_finalpass.tar       ( 42 GB)
 .../FlyingThings3D/derived_data/flyingthings3d__disparity.tar.bz2      ( 87 GB)

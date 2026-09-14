@@ -306,6 +306,23 @@ reference numbers, and what could and could not be reproduced here.
 `"adapt_unlabeled"` or `"evaluate"`. Ground truth is loaded **only** when
 `MODE == "evaluate"`.
 
+Every setting lives in a single documented **Control Panel** cell; the rest of the notebook
+derives from it, so adding a dataset or switching to evaluation is a one-line edit. A
+preflight cell then prints what your settings actually mean (disparity reach in pixels, cost
+volume memory, which data will be downloaded) and warns about inconsistencies before anything
+runs.
+
+Large datasets are **attached, not downloaded** — Scene Flow is 132 GB against Kaggle's 20 GB
+quota:
+
+```python
+DATASETS = {"sceneflow": 1.0}
+ATTACHED = {"sceneflow": "/kaggle/input/sceneflow"}
+```
+
+The mirror's internal folder layout is discovered automatically (official or
+`FlyingThings3D_subset`, at any nesting depth); see [docs/DATASETS.md](docs/DATASETS.md).
+
 ## Tests
 
 ```bash
