@@ -81,9 +81,44 @@ searches the attached directory up to 5 levels deep for either recognised struct
 | `official` | `frames_finalpass/TRAIN/<A\|B\|C>/<scene>/left/*.png` + `disparity/TRAIN/...` |
 | `subset` | `train/image_clean/left/*.png` + `train/disparity/left/*.pfm` |
 
-It falls back to `frames_cleanpass` when there is no `frames_finalpass`, and maps the `TEST`
-split onto the subset release's `val` directory. Mirrors commonly wrap everything in an extra
-folder (`sceneflow/FlyingThings3D/...`); that is handled.
+Discovery is **structural**, not path-name matching: it locates an image-pass directory
+(`frames_*`, `image_clean`, `image_final`), works out how — or whether — that tree is split,
+then indexes every directory beneath it holding a `left`/`right` pair, at any depth. One code
+path therefore covers official FlyingThings3D (`TRAIN/<A|B|C>/<scene>/left`), Monkaa
+(`<scene>/left`), Driving (`<focallength>/<direction>/<speed>/left`), the flat subset release,
+and mirrors that nest or flatten any of them.
+
+It prefers FlyingThings3D (the paper's benchmark) and `finalpass`, falls back to
+`frames_cleanpass`, and maps `TEST` onto the subset release's `val`. Override with
+`SCENEFLOW_SUBSET` / `SCENEFLOW_PASS` in the notebook, or `subset=` / `pass_name=` on
+`SceneFlowDataset`.
+
+#### Worked example: `arthurthom/sceneflow`
+
+That mirror is double-nested, cleanpass-only, has no `TRAIN` level, and bundles four datasets:
+
+```
+sceneflow/
+├── FlyingThings3D/FlyingThings3D/{frames_cleanpass,disparity}/<A|B|C>/<scene>/left|right/
+├── Driving/Driving/{frames_cleanpass,disparity}/<focallength>/<direction>/<speed>/left|right/
+├── Monkaa/Monkaa/{frames_cleanpass,disparity}/<scene>/left|right/
+└── kitti2015/{training,testing}/
+```
+
+```python
+DATASETS = {"sceneflow": 1.0}
+ATTACHED = {
+    "sceneflow": "/kaggle/input/datasets/arthurthom/sceneflow",
+    "kitti2015": "/kaggle/input/datasets/arthurthom/sceneflow/kitti2015/training",
+}
+```
+
+**This mirror keeps no TRAIN/TEST division.** Training on it is fine — training is label-free
+— but its "TEST" split is the same frames as TRAIN, so benchmarking it would score the model
+on its own training images. `SceneFlowDataset` **refuses** `BENCHMARK` mode on an unsplit tree
+rather than emit a contaminated number; benchmark on `middlebury2014`, `eth3d` or `kitti2015`
+instead, which have genuine held-out splits. The escape hatch
+(`allow_unsplit_benchmark=True`) exists only for a copy the model provably never saw.
 
 An **images-only mirror is fine for training** — training here is label-free. Disparity is
 only needed to benchmark, and `SceneFlowDataset` raises a clear error naming the problem if
