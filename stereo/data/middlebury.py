@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from .base import DatasetMode, StereoDataset
+from .discovery import describe_tree, find_view_file_pairs
 from .io import read_image, read_middlebury_calib, read_middlebury_disparity, read_nonocc_mask
 
 
@@ -45,7 +46,11 @@ class MiddleburyDataset(StereoDataset):
         self.root = root
         self.scenes = scenes if scenes is not None else _index_scenes(root, self.left_name, self.right_name)
         if not self.scenes:
-            raise RuntimeError(f"no {self.name} scenes found under {root}")
+            raise RuntimeError(
+                f"no {self.name} scenes found under {root}.\n"
+                f"Looked for directories containing both {self.left_name} and "
+                f"{self.right_name}, at any depth.\n\n"
+                f"What is actually there:\n{describe_tree(root)}")
 
     def _scene_dir(self, index: int) -> str:
         return os.path.join(self.root, self.scenes[index])
@@ -78,13 +83,15 @@ class MiddleburyDataset(StereoDataset):
 
 
 def _index_scenes(root: str, left_name: str, right_name: str) -> List[str]:
+    """Scene directories, found at any depth.
+
+    Mirrors commonly wrap the scenes in extra folders (``MiddEval3/trainingH/``,
+    a resolution folder, or just the dataset's own name), so the scenes are
+    located by looking for the two view files rather than by assuming they sit
+    directly under ``root``. Paths are returned relative to ``root``.
+    """
     if not os.path.isdir(root):
         return []
-    scenes = []
-    for entry in sorted(os.listdir(root)):
-        scene_dir = os.path.join(root, entry)
-        if (os.path.isdir(scene_dir)
-                and os.path.exists(os.path.join(scene_dir, left_name))
-                and os.path.exists(os.path.join(scene_dir, right_name))):
-            scenes.append(entry)
-    return scenes
+    scenes = [os.path.relpath(path, root)
+              for path in find_view_file_pairs(root, left_name, right_name)]
+    return sorted(scenes)

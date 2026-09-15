@@ -48,7 +48,10 @@ FORBIDDEN_ZONE = (
     "stereo/geometry.py", "stereo/config.py", "stereo/data/augmentation.py",
     "stereo/utils/seed.py", "stereo/utils/checkpoint.py", "train.py",
 )
-GUARD_ZONE = ("stereo/data/base.py",)
+#: Modules that name ground-truth terms precisely in order to EXCLUDE them:
+#: base.py defines the forbidden key list and the assert_label_free() check;
+#: discovery.py lists ground-truth directory names so image search skips them.
+GUARD_ZONE = ("stereo/data/base.py", "stereo/data/discovery.py")
 LOADER_ZONE = (
     "stereo/data/io.py", "stereo/data/registry.py", "stereo/data/stereo_folder.py",
     "stereo/data/sceneflow.py", "stereo/data/kitti.py", "stereo/data/middlebury.py",
@@ -192,7 +195,7 @@ def main() -> int:
         code = [hit for hit in zone_hits if hit.in_code]
         prose = [hit for hit in zone_hits if not hit.in_code]
         verdict = {"FORBIDDEN": "ground truth must NOT appear in code",
-                   "GUARD": "names the keys in order to reject them",
+                   "GUARD": "names the terms in order to exclude them",
                    "LOADERS": "BENCHMARK mode only",
                    "ALLOWED": "ground truth permitted",
                    "UNCLASSIFIED": "review manually"}[zone]

@@ -3,6 +3,53 @@
 Every URL below was checked to resolve and serve the stated content. Sizes are the
 `Content-Length` reported by the servers.
 
+## Attaching on Kaggle (what the notebook does)
+
+The notebook trains on three datasets, all **attached** as Kaggle inputs rather than
+downloaded — so Kaggle's 20 GB working-directory quota never applies:
+
+| Dataset | Kaggle | Role |
+|---|---|---|
+| FlyingThings3D | `kiraarsene/flying-things-3d` | **TRAIN split only**; TEST is the paper's Table IV benchmark, held out |
+| KITTI Eigen split | `awsaf49/kitti-eigen-split-dataset` | training only — the paper reports no KITTI accuracy |
+| Middlebury | `minhanhtruong/middleburystereodataset` | training (the paper trains on the Middlebury training set) |
+
+```python
+DATASETS = {"sceneflow": 0.50, "kitti": 0.25, "middlebury": 0.25}
+ATTACHED = {
+    "sceneflow":  "/kaggle/input/flying-things-3d",
+    "kitti":      "/kaggle/input/kitti-eigen-split-dataset",
+    "middlebury": "/kaggle/input/middleburystereodataset",
+}
+SCENEFLOW_SPLIT = "TRAIN"     # holds out the paper's evaluation split
+```
+
+**Layout does not matter.** Every loader searches its attached directory for the pair of
+views at any nesting depth (`stereo/data/discovery.py`) and prints the real tree if it cannot:
+
+| Dataset | Layouts handled |
+|---|---|
+| FlyingThings3D | `frames_finalpass\|frames_cleanpass/TRAIN/<A\|B\|C>/<scene>/left`, the flat `FlyingThings3D_subset` release, or bare `left`/`right` trees with no pass directory |
+| KITTI | raw / Eigen (`<date>/<date>_drive_NNNN_sync/image_02/data`), 2015 (`image_2`), 2012 (`colored_0`) |
+| Middlebury | any directory containing `im0.png` + `im1.png` |
+
+### What the paper evaluates on
+
+| Paper | Evaluation set | Reproducible? |
+|---|---|---|
+| Table IV | Scene Flow FlyingThings3D **TEST** (EPE 0.936, %Bad 10.0) | **Yes**, if the mirror ships TEST + disparity |
+| Table V | Middlebury 2014 **TEST** (bad2.0 12.7/17.4) | **No, for anyone** — GT is held by the Middlebury server; results exist only via online submission |
+
+KITTI raw carries **no disparity ground truth** (the Eigen protocol scores *depth* against
+projected LiDAR, a different benchmark), so `KittiStereoDataset` refuses `BENCHMARK` mode on
+it and explains why.
+
+Because the paper *trains* on the Middlebury training set, training on it here follows the
+paper — but that is Middlebury's only publicly-labelled split, so it then cannot double as a
+local benchmark. Set `DATASETS["middlebury"] = 0` to hold it out instead.
+
+## Downloading (outside Kaggle)
+
 ```bash
 python -m stereo.data.download --list             # describe everything
 python -m stereo.data.download middlebury         # fetch one

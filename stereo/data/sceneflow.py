@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from .base import DatasetMode, StereoDataset
+from .discovery import common_ancestor, describe_tree, find_view_dir_pairs
 from .io import read_image, read_middlebury_disparity
 
 #: Scene Flow renders with a virtual camera of focal length 1050 px (35 mm lens)
@@ -129,6 +130,37 @@ def _pass_candidates(root: str, pass_name: Optional[str]):
             yield (os.path.join(base, child),
                    disparity if os.path.isdir(disparity) else None,
                    child)
+
+
+def _fallback_candidates(root: str):
+    """Last resort: a mirror with no ``frames_*`` / ``image_*`` directory at all.
+
+    Some mirrors strip the pass level entirely and ship ``TRAIN/A/0000/left``
+    directly. The image tree is then inferred from wherever ``left``/``right``
+    pairs actually are -- ground-truth trees are skipped by the shared discovery
+    helper, so a parallel ``disparity/`` tree is not mistaken for imagery -- and
+    a sibling ``disparity`` directory is paired with it if one exists.
+    """
+    pair_dirs = [directory for directory, _ in
+                 find_view_dir_pairs(root, [("left", "right")], max_depth=MAX_SEARCH_DEPTH)]
+    if not pair_dirs:
+        return
+
+    ancestor = common_ancestor(pair_dirs)
+    if ancestor is None:
+        return
+    # Walk up while the parent still contains only this one tree, so that a
+    # TRAIN/TEST level above the scenes is included rather than cut off.
+    for candidate in (ancestor, os.path.dirname(ancestor)):
+        if not candidate or not os.path.isdir(candidate) or candidate == os.path.dirname(candidate):
+            continue
+        disparity = None
+        for sibling in ("disparity", "disparities", "disp"):
+            path = os.path.join(os.path.dirname(candidate), sibling)
+            if os.path.isdir(path):
+                disparity = path
+                break
+        yield candidate, disparity, "(no pass directory)"
 
 
 def _resolve_split(frames_dir: str, disparity_dir: Optional[str], split: str):
@@ -228,7 +260,10 @@ def discover_sceneflow(root: str, split: str = "TRAIN", pass_name: Optional[str]
         raise FileNotFoundError(f"no such directory: {root}")
 
     layouts = []
-    for frames_dir, disparity_dir, found_pass in _pass_candidates(root, pass_name):
+    candidates = list(_pass_candidates(root, pass_name))
+    if not candidates and not pass_name:
+        candidates = list(_fallback_candidates(root))
+    for frames_dir, disparity_dir, found_pass in candidates:
         found_subset = _subset_of(frames_dir, root)
         if subset and found_subset.lower() != subset.lower():
             continue
@@ -279,33 +314,6 @@ def find_scene_dirs(frames_dir: str) -> List[str]:
             dirnames[:] = [d for d in dirnames if d not in ("left", "right")]
         dirnames.sort()
     return sorted(scenes)
-
-
-def describe_tree(root: str, max_depth: int = 4, max_entries: int = 10) -> str:
-    """A short directory tree, for diagnosing an unrecognised mirror."""
-    lines = []
-
-    def walk(path: str, depth: int, prefix: str) -> None:
-        if depth > max_depth:
-            return
-        children = _subdirs(path)
-        try:
-            files = sorted(f for f in os.listdir(path) if not os.path.isdir(os.path.join(path, f)))
-        except OSError:
-            files = []
-        for child in children[:max_entries]:
-            lines.append(f"{prefix}{child}/")
-            walk(os.path.join(path, child), depth + 1, prefix + "  ")
-        if len(children) > max_entries:
-            lines.append(f"{prefix}... and {len(children) - max_entries} more directories")
-        if files:
-            shown = ", ".join(files[:3])
-            more = f" ... and {len(files) - 3} more" if len(files) > 3 else ""
-            lines.append(f"{prefix}[{len(files)} files: {shown}{more}]")
-
-    lines.append(f"{root}/")
-    walk(root, 1, "  ")
-    return "\n".join(lines)
 
 
 class SceneFlowEntry(NamedTuple):
