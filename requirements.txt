@@ -7,3 +7,4 @@ matplotlib>=3.5               # visualisation only
 
 # Testing
 pytest>=7.0
+h5py>=3.0                     # HDF5-packed stereo datasets (optional)

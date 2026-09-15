@@ -22,6 +22,7 @@ from torch.utils.data import ConcatDataset, DataLoader, Subset, WeightedRandomSa
 from .augmentation import PhotometricAugmentConfig, ResizeConfig, build_train_transform
 from .base import DatasetMode, StereoDataset, collate_samples
 from .eth3d import Eth3dDataset
+from .hdf5_stereo import Hdf5StereoDataset
 from .kitti import KittiStereoDataset
 from .middlebury import MiddleburyDataset
 from .sceneflow import SceneFlowDataset
@@ -33,6 +34,7 @@ DATASET_TYPES = {
     "kitti": KittiStereoDataset,
     "middlebury": MiddleburyDataset,
     "eth3d": Eth3dDataset,
+    "hdf5": Hdf5StereoDataset,
 }
 
 

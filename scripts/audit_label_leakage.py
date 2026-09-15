@@ -52,11 +52,12 @@ FORBIDDEN_ZONE = (
 #: base.py defines the forbidden key list and the assert_label_free() check;
 #: discovery.py lists ground-truth directory names so image search skips them.
 GUARD_ZONE = ("stereo/data/base.py", "stereo/data/discovery.py")
-LOADER_ZONE = (
-    "stereo/data/io.py", "stereo/data/registry.py", "stereo/data/stereo_folder.py",
-    "stereo/data/sceneflow.py", "stereo/data/kitti.py", "stereo/data/middlebury.py",
-    "stereo/data/eth3d.py", "stereo/data/download.py", "stereo/data/__init__.py",
-)
+#: The dataset package. Every module here may implement _load_ground_truth(),
+#: which only DatasetMode.BENCHMARK ever calls. Declared as a prefix rather than
+#: a file list so that adding a loader cannot silently land in UNCLASSIFIED --
+#: the training-path and guard modules inside stereo/data/ are pulled out by the
+#: FORBIDDEN and GUARD zones above, which are matched first.
+LOADER_ZONE = ("stereo/data/",)
 ALLOWED_ZONE = (
     "stereo/evaluation/", "stereo/postprocess.py", "stereo/utils/visualization.py",
     "stereo/utils/calibration.py", "stereo/utils/__init__.py", "stereo/__init__.py",
