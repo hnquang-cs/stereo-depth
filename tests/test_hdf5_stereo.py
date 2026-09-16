@@ -101,7 +101,7 @@ def test_disparity_is_only_read_in_benchmark_mode(tmp_path):
 def test_benchmark_without_disparity_is_refused(tmp_path):
     path = write_h5(tmp_path / "d.hdf5", {"left": images(), "right": images()})
     assert len(Hdf5StereoDataset(path, mode=DatasetMode.TRAIN)) == 4
-    with pytest.raises(FileNotFoundError, match="no disparity array"):
+    with pytest.raises(FileNotFoundError, match="no disparity data"):
         Hdf5StereoDataset(path, mode=DatasetMode.BENCHMARK)
 
 

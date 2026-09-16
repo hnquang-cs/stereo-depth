@@ -106,7 +106,73 @@ def test_kitti_2015_is_preferred_over_raw_when_both_present(tmp_path):
     root = str(tmp_path / "training")
     _png(os.path.join(root, "image_2", "000000_10.png"))
     _png(os.path.join(root, "image_3", "000000_10.png"))
+    _disparity_png(os.path.join(root, "disp_occ_0", "000000_10.png"))
     assert KittiStereoDataset(str(tmp_path), mode=DatasetMode.TRAIN).version == "2015"
+
+
+# --------------------------------------------------------------------------- #
+# KITTI odometry
+# --------------------------------------------------------------------------- #
+
+KITTI_ODOMETRY_CALIB = (
+    "P0: 718.856 0 607.19 0 0 718.856 185.22 0 0 0 1 0\n"
+    "P1: 718.856 0 607.19 -386.14 0 718.856 185.22 0 0 0 1 0\n"
+    "P2: 718.856 0 607.19 45.38 0 718.856 185.22 0 0 0 1 0\n"
+    "P3: 718.856 0 607.19 -337.35 0 718.856 185.22 0 0 0 1 0\n"
+    "Tr: 0 0 0 0 0 0 0 0 0 0 0 0\n"
+)
+
+
+def build_kitti_odometry(root, sequences=("00", "01"), frames=3, views=("image_2", "image_3")):
+    """sequences/<NN>/image_2|image_3/*.png + one calib.txt per sequence."""
+    for sequence in sequences:
+        sequence_dir = os.path.join(root, "sequences", sequence)
+        for view in views:
+            for index in range(frames):
+                _png(os.path.join(sequence_dir, view, f"{index:06d}.png"))
+        with open(os.path.join(sequence_dir, "calib.txt"), "w") as handle:
+            handle.write(KITTI_ODOMETRY_CALIB)
+        with open(os.path.join(sequence_dir, "times.txt"), "w") as handle:
+            handle.write("0.0\n")
+    return root
+
+
+def test_kitti_odometry_is_detected_and_paired(tmp_path):
+    """Odometry shares image_2/image_3 with the 2015 benchmark but ships no
+    disparity, so it must be recognised as its own, training-only layout."""
+    root = build_kitti_odometry(str(tmp_path))
+    dataset = KittiStereoDataset(root, mode=DatasetMode.TRAIN)
+    assert dataset.version == "odometry"
+    assert len(dataset) == 6
+    sample = dataset[0]
+    assert sample["left"].shape == (3, 32, 48)
+    assert not any(k in sample for k in ("disparity_gt", "valid_gt_mask"))
+
+
+def test_kitti_odometry_reads_its_per_sequence_calibration(tmp_path):
+    """Odometry keeps one calib.txt per sequence, not one file per frame."""
+    root = build_kitti_odometry(str(tmp_path))
+    metadata = KittiStereoDataset(root, mode=DatasetMode.TRAIN)[0]["metadata"]
+    assert metadata["focal_length"] == pytest.approx(718.856)
+    # Colour cameras: baseline = (P3[0,3] - P2[0,3]) / -f
+    assert metadata["baseline"] == pytest.approx((-337.35 - 45.38) / -718.856, rel=1e-4)
+
+
+def test_kitti_odometry_grayscale_pair_and_its_calibration(tmp_path):
+    """Some odometry mirrors ship only the grayscale cameras."""
+    root = build_kitti_odometry(str(tmp_path), views=("image_0", "image_1"))
+    dataset = KittiStereoDataset(root, mode=DatasetMode.TRAIN)
+    assert dataset.version == "odometry_gray"
+    assert len(dataset) == 6
+    # Grayscale cameras must use P0/P1, not the colour P2/P3.
+    metadata = dataset[0]["metadata"]
+    assert metadata["baseline"] == pytest.approx((-386.14 - 0.0) / -718.856, rel=1e-4)
+
+
+def test_kitti_odometry_refuses_to_benchmark(tmp_path):
+    root = build_kitti_odometry(str(tmp_path))
+    with pytest.raises(RuntimeError, match="no disparity ground truth"):
+        KittiStereoDataset(root, mode=DatasetMode.BENCHMARK)
 
 
 def test_kitti_unrecognised_layout_reports_the_tree(tmp_path):

@@ -116,6 +116,77 @@ def inspect_hdf5(root: str, max_files: int = 5) -> str:
     return "\n".join(lines)
 
 
+#: Markers identifying a view inside a per-sample array name, e.g.
+#: ``data/flying/left\\train/0000/0006.png``. Ordered longest-first so that
+#: "left" does not match inside a longer token before the longer one is tried.
+KEYED_VIEW_MARKERS = (("left", "right"), ("l", "r"), ("im0", "im1"), ("cam0", "cam1"))
+#: Markers for the matching ground-truth array, tried in order.
+KEYED_DISPARITY_MARKERS = ("disp", "disparity")
+#: Extensions the per-sample arrays are named with. Ground truth often differs
+#: from the images (``.tif`` disparity beside ``.png`` images).
+KEYED_EXTENSIONS = (".png", ".tif", ".tiff", ".jpg", ".jpeg", ".pfm", "")
+
+
+def _replace_last(text: str, old: str, new: str) -> Optional[str]:
+    index = text.rfind(old)
+    return text[:index] + new + text[index + len(old):] if index >= 0 else None
+
+
+def detect_keyed_pairs(names: Sequence[str]):
+    """Find per-sample arrays paired by a left/right marker in their names.
+
+    Rather than assuming a template, every array name containing a view marker
+    is tested by swapping that marker for its partner and checking whether the
+    result also exists. That handles the real-world naming seen in the wild --
+    ``data/flying/left\\train/0000/0006.png`` paired with
+    ``data/flying/right\\train/0000/0006.png`` -- without needing the separator,
+    prefix or extension to be configured.
+
+    Returns ``(pairs, marker)`` where ``pairs`` is ``[(left_name, right_name), ...]``.
+    """
+    available = set(names)
+    for left_marker, right_marker in KEYED_VIEW_MARKERS:
+        pairs = []
+        for name in names:
+            if left_marker not in name.lower():
+                continue
+            # Match case-insensitively but substitute on the real text.
+            lowered = name.lower()
+            index = lowered.rfind(left_marker)
+            candidate = name[:index] + right_marker + name[index + len(left_marker):]
+            if candidate in available and candidate != name:
+                pairs.append((name, candidate))
+        if len(pairs) >= 2:
+            return sorted(pairs), (left_marker, right_marker)
+    return [], None
+
+
+def keyed_disparity_name(left_name: str, marker: Tuple[str, str],
+                         available: Sequence[str]) -> Optional[str]:
+    """The ground-truth array matching a left-view array, if the file has one."""
+    available = set(available)
+    lowered = left_name.lower()
+    index = lowered.rfind(marker[0])
+    stem, extension = os.path.splitext(left_name)
+    for disparity_marker in KEYED_DISPARITY_MARKERS:
+        base = left_name[:index] + disparity_marker + left_name[index + len(marker[0]):]
+        if base in available:
+            return base
+        base_stem = os.path.splitext(base)[0]
+        for candidate_extension in KEYED_EXTENSIONS:
+            if base_stem + candidate_extension in available:
+                return base_stem + candidate_extension
+    return None
+
+
+def keyed_sample_id(left_name: str, marker: Tuple[str, str]) -> str:
+    """A stable, readable id: the array name with the view marker removed."""
+    lowered = left_name.lower()
+    index = lowered.rfind(marker[0])
+    key = left_name[index + len(marker[0]):].lstrip("\\/")
+    return os.path.splitext(key)[0].replace("\\", "/")
+
+
 def _looks_like_images(shape: Sequence[int]) -> bool:
     """``(N, H, W, 3)`` or ``(N, 3, H, W)`` with plausible spatial extents."""
     if len(shape) != 4:
@@ -177,7 +248,8 @@ class Hdf5StereoDataset(StereoDataset):
                  name: Optional[str] = None, left_key: Optional[str] = None,
                  right_key: Optional[str] = None, disparity_key: Optional[str] = None,
                  stacked_key: Optional[str] = None, view_axis: int = 1,
-                 focal_length: Optional[float] = None, baseline: Optional[float] = None):
+                 focal_length: Optional[float] = None, baseline: Optional[float] = None,
+                 split: Optional[str] = None, bgr: bool = True):
         super().__init__(mode=mode, transform=transform, name=name or "hdf5_stereo")
         _require_h5py()   # fail early with a clear message
 
@@ -194,9 +266,16 @@ class Hdf5StereoDataset(StereoDataset):
         arrays = list_arrays(self.path)
         self.stacked_key, self.view_axis = stacked_key, view_axis
         self.left_key, self.right_key = left_key, right_key
+        self.bgr = bgr
+        self.keyed_pairs: List[Tuple[str, str]] = []
+        self.keyed_disparity: List[Optional[str]] = []
+        self.keyed_ids: List[str] = []
 
         if not (stacked_key or (left_key and right_key)):
             detected = detect_view_arrays(arrays)
+            if detected is None:
+                # Per-sample arrays, one per image, paired by a marker in the name.
+                detected = self._try_keyed(arrays, split, mode)
             if detected is None:
                 raise RuntimeError(
                     f"could not find a stereo pair inside {self.path}.\n"
@@ -213,19 +292,51 @@ class Hdf5StereoDataset(StereoDataset):
                 _, self.stacked_key, self.view_axis = detected
 
         self.disparity_key = disparity_key
-        if self.disparity_key is None:
+        if self.disparity_key is None and not self.keyed_pairs:
             for candidate, shape, _ in arrays:
                 if _match_name(candidate, DISPARITY_NAME_HINTS) < len(DISPARITY_NAME_HINTS):
                     self.disparity_key = candidate
                     break
-        if mode is DatasetMode.BENCHMARK and self.disparity_key is None:
-            raise FileNotFoundError(
-                f"{self.path} has no disparity array, so it cannot be benchmarked. "
-                f"Arrays present: {[n for n, _, _ in arrays]}")
 
-        self._length = self._read_length()
+        has_disparity = bool(self.disparity_key) or any(self.keyed_disparity)
+        if mode is DatasetMode.BENCHMARK and not has_disparity:
+            raise FileNotFoundError(
+                f"{self.path} has no disparity data, so it cannot be benchmarked. "
+                f"Arrays present: {[n for n, _, _ in arrays][:20]}")
+
+        self._length = len(self.keyed_pairs) if self.keyed_pairs else self._read_length()
         self.focal_length = focal_length
         self.baseline = baseline
+
+    def _try_keyed(self, arrays, split: Optional[str], mode: DatasetMode):
+        """Detect and index per-sample ("keyed") arrays. Returns a sentinel or None."""
+        names = [name for name, _, _ in arrays]
+        pairs, marker = detect_keyed_pairs(names)
+        if not pairs:
+            return None
+
+        ids = [keyed_sample_id(left, marker) for left, _ in pairs]
+
+        # Keys commonly carry the split as their first component ("train/...",
+        # "val/..."). Honour it, so the evaluation split can be held out of
+        # training rather than silently mixed in.
+        available_splits = sorted({i.split("/")[0].lower() for i in ids
+                                   if "/" in i and i.split("/")[0].lower()
+                                   in ("train", "val", "test", "validation")})
+        if split and available_splits:
+            wanted = {"TRAIN": ("train",), "TEST": ("val", "test", "validation")}[split.upper()]
+            selected = [k for k in range(len(ids)) if ids[k].split("/")[0].lower() in wanted]
+            if not selected:
+                raise FileNotFoundError(
+                    f"{self.path} has no {split!r} split. Splits present: {available_splits}")
+            pairs = [pairs[k] for k in selected]
+            ids = [ids[k] for k in selected]
+
+        self.keyed_pairs = pairs
+        self.keyed_ids = ids
+        self.keyed_disparity = [keyed_disparity_name(left, marker, names) for left, _ in pairs]
+        self.keyed_splits = available_splits
+        return "keyed", marker[0], marker[1]
 
     # -- file handling -------------------------------------------------------- #
 
@@ -249,8 +360,7 @@ class Hdf5StereoDataset(StereoDataset):
 
     # -- decoding -------------------------------------------------------------- #
 
-    @staticmethod
-    def _to_hwc_float(array: np.ndarray) -> np.ndarray:
+    def _to_hwc_float(self, array: np.ndarray) -> np.ndarray:
         image = np.asarray(array)
         if image.ndim == 3 and image.shape[0] in (1, 3, 4) and image.shape[2] > 4:
             image = np.transpose(image, (1, 2, 0))   # CHW -> HWC
@@ -259,6 +369,8 @@ class Hdf5StereoDataset(StereoDataset):
         if image.shape[2] == 1:
             image = np.repeat(image, 3, axis=2)
         image = image[:, :, :3].astype(np.float32)
+        if getattr(self, "bgr", False):
+            image = image[:, :, ::-1]      # the container stores BGR; this repo uses RGB
         if image.max() > 1.5:                         # 0-255 rather than 0-1
             image = image / 255.0
         return np.ascontiguousarray(np.clip(image, 0.0, 1.0))
@@ -270,6 +382,10 @@ class Hdf5StereoDataset(StereoDataset):
 
     def _load_images(self, index: int) -> Tuple[np.ndarray, np.ndarray]:
         handle = self._file()
+        if self.keyed_pairs:
+            left_name, right_name = self.keyed_pairs[index]
+            return (self._to_hwc_float(handle[left_name][()]),
+                    self._to_hwc_float(handle[right_name][()]))
         if self.stacked_key:
             block = handle[self.stacked_key][index]
             left = np.take(block, 0, axis=self.view_axis - 1)
@@ -280,7 +396,8 @@ class Hdf5StereoDataset(StereoDataset):
         return self._to_hwc_float(left), self._to_hwc_float(right)
 
     def _sample_metadata(self, index: int) -> Dict[str, Any]:
-        metadata: Dict[str, Any] = {"sample_id": f"{index:07d}"}
+        sample_id = self.keyed_ids[index] if self.keyed_ids else f"{index:07d}"
+        metadata: Dict[str, Any] = {"sample_id": sample_id}
         if self.focal_length is not None:
             metadata["focal_length"] = self.focal_length
         if self.baseline is not None:
@@ -288,7 +405,14 @@ class Hdf5StereoDataset(StereoDataset):
         return metadata
 
     def _load_ground_truth(self, index: int) -> Dict[str, np.ndarray]:
-        disparity = np.asarray(self._file()[self.disparity_key][index]).astype(np.float32)
+        if self.keyed_pairs:
+            name = self.keyed_disparity[index]
+            if name is None:
+                raise FileNotFoundError(
+                    f"no disparity array for {self.keyed_ids[index]!r} in {self.path}")
+            disparity = np.asarray(self._file()[name][()]).astype(np.float32)
+        else:
+            disparity = np.asarray(self._file()[self.disparity_key][index]).astype(np.float32)
         while disparity.ndim > 2:
             disparity = disparity[..., 0] if disparity.shape[-1] == 1 else disparity[0]
         valid = np.isfinite(disparity) & (disparity > 0)
@@ -296,11 +420,24 @@ class Hdf5StereoDataset(StereoDataset):
                 "valid_gt_mask": valid.astype(np.float32)}
 
     def describe(self) -> str:
-        if self.stacked_key:
+        if self.keyed_pairs:
+            packing = (f"keyed: one array per image, {len(self.keyed_pairs)} pairs\n"
+                       f"              e.g. {self.keyed_pairs[0][0]}")
+        elif self.stacked_key:
             packing = f"stacked array {self.stacked_key!r} (view axis {self.view_axis})"
         else:
             packing = f"left={self.left_key!r} right={self.right_key!r}"
         return (f"file        : {self.path}\n"
                 f"packing     : {packing}\n"
                 f"pairs       : {self._length}\n"
-                f"disparity   : {self.disparity_key or 'NOT PRESENT -- images only'}")
+                f"disparity   : {self._disparity_summary()}"
+                + (f"\nsplits      : {', '.join(self.keyed_splits)}"
+                   if getattr(self, "keyed_splits", None) else ""))
+
+    def _disparity_summary(self) -> str:
+        if self.keyed_pairs:
+            found = sum(1 for d in self.keyed_disparity if d)
+            if not found:
+                return "NOT PRESENT -- images only"
+            return f"{found}/{len(self.keyed_pairs)} samples, e.g. {next(d for d in self.keyed_disparity if d)}"
+        return self.disparity_key or "NOT PRESENT -- images only"

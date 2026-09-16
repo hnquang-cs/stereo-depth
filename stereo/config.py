@@ -87,6 +87,10 @@ class TrainingConfig:
     #: Label-free validation criterion used for "best" checkpoint selection.
     selection_metric: str = "val/photometric"
     max_steps_per_epoch: Optional[int] = None
+    #: Save a left/right/disparity figure every N epochs (0 disables).
+    visualize_every: int = 5
+    #: How many stereo pairs to put in each figure.
+    visualize_samples: int = 2
 
 
 @dataclass

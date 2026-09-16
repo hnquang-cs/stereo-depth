@@ -39,8 +39,20 @@ DISPARITY_DIRS = {
     ("2012", "occ"): "disp_occ", ("2012", "noc"): "disp_noc",
 }
 #: View directories that identify each layout.
-LAYOUT_VIEWS = {"2015": ("image_2", "image_3"), "2012": ("colored_0", "colored_1"),
-                "raw": ("image_02", "image_03")}
+#: "2015" and "odometry" share the same view names; they are told apart by
+#: whether a disparity directory sits alongside (odometry ships no disparity).
+LAYOUT_VIEWS = {
+    "2015": ("image_2", "image_3"),
+    "2012": ("colored_0", "colored_1"),
+    "raw": ("image_02", "image_03"),           # raw recordings / Eigen split
+    "odometry": ("image_2", "image_3"),        # colour stereo, no disparity
+    "odometry_gray": ("image_0", "image_1"),   # grayscale stereo, no disparity
+}
+#: Which projection matrices in calib.txt correspond to each layout's views.
+LAYOUT_CAMERAS = {"2015": (2, 3), "2012": (0, 1), "raw": (2, 3),
+                  "odometry": (2, 3), "odometry_gray": (0, 1)}
+#: Layouts that carry no disparity ground truth at all.
+TRAINING_ONLY_LAYOUTS = {"raw", "odometry", "odometry_gray"}
 
 
 class KittiEntry(NamedTuple):
@@ -76,8 +88,21 @@ class KittiStereoDataset(StereoDataset):
         self.version = self._detect_version(root, version)
         super().__init__(mode=mode, transform=transform, name=name or f"kitti{self.version}")
 
+        if mode is DatasetMode.BENCHMARK and self.version in TRAINING_ONLY_LAYOUTS:
+            detail = ("raw / Eigen-split recordings" if self.version == "raw"
+                      else "odometry sequences")
+            raise RuntimeError(
+                f"KITTI {detail} carry no disparity ground truth, so they cannot be used for "
+                f"disparity benchmarking. (The Eigen protocol scores *depth* against projected "
+                f"LiDAR, a different benchmark, and the paper reports no KITTI accuracy at all "
+                f"-- only runtimes, in its Table III.)\n"
+                f"Use this dataset for label-free training, and benchmark on kitti2015, "
+                f"middlebury2014 or eth3d.")
+
         if reference_frames_only is None:
-            reference_frames_only = (mode == DatasetMode.BENCHMARK and self.version != "raw")
+            # Only the benchmark splits label a single reference frame per scene.
+            reference_frames_only = (mode == DatasetMode.BENCHMARK
+                                     and self.version not in TRAINING_ONLY_LAYOUTS)
 
         self.entries = self._index(reference_frames_only)
         if not self.entries:
@@ -86,27 +111,32 @@ class KittiStereoDataset(StereoDataset):
                 f"Looked for {LAYOUT_VIEWS[self.version]} directories containing images.\n\n"
                 f"What is actually there:\n{describe_tree(root)}")
 
-        if mode is DatasetMode.BENCHMARK and self.version == "raw":
-            raise RuntimeError(
-                "KITTI raw / Eigen-split recordings carry no disparity ground truth, so they "
-                "cannot be used for disparity benchmarking. (The Eigen protocol scores *depth* "
-                "against projected LiDAR, which is a different benchmark, and the paper reports "
-                "no KITTI accuracy at all -- only runtimes, in its Table III.)\n"
-                "Use this dataset for label-free training, and benchmark on kitti2015, "
-                "middlebury2014 or eth3d.")
-
     # -- layout detection ---------------------------------------------------- #
 
     @staticmethod
-    def _detect_version(root: str, version: Optional[str]) -> str:
+    def _has_disparity_sibling(root: str, views) -> bool:
+        """True if any directory holding these views also holds a disparity directory."""
+        for pair_dir, _ in find_view_dir_pairs(root, [views], max_depth=6):
+            children = set(os.listdir(pair_dir)) if os.path.isdir(pair_dir) else set()
+            if children & set(DISPARITY_DIRS.values()):
+                return True
+        return False
+
+    @classmethod
+    def _detect_version(cls, root: str, version: Optional[str]) -> str:
         if version is not None:
             if version not in LAYOUT_VIEWS:
                 raise ValueError(f"version must be one of {sorted(LAYOUT_VIEWS)}, got {version!r}")
             return version
-        # Prefer a benchmark layout when present: it is the one with ground truth.
-        for candidate in ("2015", "2012", "raw"):
-            if find_view_dir_pairs(root, [LAYOUT_VIEWS[candidate]], max_depth=6):
-                return candidate
+        # Prefer a layout that has ground truth; fall back to training-only ones.
+        for candidate in ("2015", "2012", "raw", "odometry", "odometry_gray"):
+            if not find_view_dir_pairs(root, [LAYOUT_VIEWS[candidate]], max_depth=6):
+                continue
+            if candidate in ("2015", "2012") and not cls._has_disparity_sibling(
+                    root, LAYOUT_VIEWS[candidate]):
+                # Same view names as the benchmark, but no disparity -> odometry.
+                continue
+            return candidate
         explanation = describe_missing_stereo(root)
         raise RuntimeError(
             f"could not identify a KITTI stereo layout under {root}.\n"
@@ -139,12 +169,15 @@ class KittiStereoDataset(StereoDataset):
             candidates.append(os.path.join(os.path.dirname(entry.pair_dir), "calib_cam_to_cam.txt"))
             candidates.append(os.path.join(entry.pair_dir, "calib_cam_to_cam.txt"))
         else:
+            # Odometry keeps one calib.txt per sequence directory; the benchmarks
+            # keep one file per frame in a calib/ folder.
+            candidates.append(os.path.join(entry.pair_dir, "calib.txt"))
             stem = entry.filename.split("_")[0]
             for folder in ("calib_cam_to_cam", "calib"):
                 candidates.append(os.path.join(entry.pair_dir, folder, stem + ".txt"))
         for path in candidates:
             if os.path.isfile(path):
-                return read_kitti_calib(path)
+                return read_kitti_calib(path, cameras=LAYOUT_CAMERAS[self.version])
         return {}
 
     def _disparity_path(self, entry: KittiEntry) -> Optional[str]:

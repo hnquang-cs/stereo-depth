@@ -283,3 +283,59 @@ def test_range_penalty_punishes_disparity_beyond_the_search_range():
     assert penalty_for(100.0) == 0.0
     assert penalty_for(200.0) > 0.0, "beyond the range must be penalised"
     assert penalty_for(400.0) > penalty_for(200.0), "penalty must grow with the excess"
+
+
+def test_visualisations_are_written_on_the_configured_cadence(unlabeled_dataset, tmp_path):
+    """left / right / disparity panels every N epochs, from clean images and
+    without touching ground truth."""
+    from stereo.data.augmentation import GeometricAugmentConfig, PhotometricAugmentConfig, ResizeConfig
+    from stereo.data.registry import DatasetSpec
+    from stereo.training import Trainer
+
+    config = Config()
+    config.model = StereoNetConfig.for_width(96, downsample=4, backbone_width=4, feature_channels=4)
+    config.dynamic_disparity = False
+    config.data.train = [DatasetSpec(type="folder", root=unlabeled_dataset)]
+    config.data.validation = [DatasetSpec(type="folder", root=unlabeled_dataset)]
+    config.data.resize = ResizeConfig(48, 96)
+    config.data.photometric_augmentation = PhotometricAugmentConfig(enabled=False)
+    config.data.geometric_augmentation = GeometricAugmentConfig(enabled=False)
+    config.training.epochs = 5
+    config.training.batch_size = 2
+    config.training.num_workers = 0
+    config.training.use_amp = False
+    config.training.output_dir = str(tmp_path / "out")
+    config.training.visualize_every = 2
+    config.teacher.enabled = False
+
+    Trainer(config, device=torch.device("cpu")).fit()
+
+    directory = tmp_path / "out" / "visualizations"
+    written = sorted(p.name for p in directory.glob("*.png"))
+    # Epochs 0, 2 and 4 of a 5-epoch run.
+    assert written == ["epoch_0000.png", "epoch_0002.png", "epoch_0004.png"], written
+    assert (directory / "epoch_0000.png").stat().st_size > 1000
+
+
+def test_visualisation_can_be_disabled(unlabeled_dataset, tmp_path):
+    from stereo.data.augmentation import GeometricAugmentConfig, PhotometricAugmentConfig, ResizeConfig
+    from stereo.data.registry import DatasetSpec
+    from stereo.training import Trainer
+
+    config = Config()
+    config.model = StereoNetConfig.for_width(96, downsample=4, backbone_width=4, feature_channels=4)
+    config.dynamic_disparity = False
+    config.data.train = [DatasetSpec(type="folder", root=unlabeled_dataset)]
+    config.data.resize = ResizeConfig(48, 96)
+    config.data.photometric_augmentation = PhotometricAugmentConfig(enabled=False)
+    config.data.geometric_augmentation = GeometricAugmentConfig(enabled=False)
+    config.training.epochs = 2
+    config.training.batch_size = 2
+    config.training.num_workers = 0
+    config.training.use_amp = False
+    config.training.output_dir = str(tmp_path / "out")
+    config.training.visualize_every = 0
+    config.teacher.enabled = False
+
+    Trainer(config, device=torch.device("cpu")).fit()
+    assert not (tmp_path / "out" / "visualizations").exists()

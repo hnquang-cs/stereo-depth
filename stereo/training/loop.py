@@ -311,6 +311,9 @@ class Trainer:
                             self.teacher, epoch, self.iteration,
                             extra={"history_tail": self.history[-1]})
 
+            if cfg.visualize_every and epoch % cfg.visualize_every == 0:
+                self.save_visualization(epoch)
+
             # Checkpoint selection on a LABEL-FREE criterion only.
             selection = val_logs.get(cfg.selection_metric, train_logs.get("photometric"))
             if selection is not None and selection < self.best_metric:
@@ -326,6 +329,65 @@ class Trainer:
                 json.dump(self.history, handle, indent=2)
 
         return best_path if os.path.exists(best_path) else last_path
+
+    # -- visualisation ---------------------------------------------------------- #
+
+    @torch.no_grad()
+    def save_visualization(self, epoch: int) -> Optional[str]:
+        """Write a left / right / predicted-disparity figure for this epoch.
+
+        Drawn from the validation loader when there is one, otherwise from the
+        training loader, and always from the *clean* (un-jittered) images so the
+        panel shows what the model actually sees geometrically. Purely a
+        monitoring artefact: no ground truth is involved, and nothing here feeds
+        back into the objective.
+        """
+        try:
+            from ..utils.visualization import HAVE_MATPLOTLIB, colorize, save_evaluation_figure, \
+                to_numpy_image
+        except Exception as error:                      # pragma: no cover
+            print(f"  visualisation unavailable: {error}")
+            return None
+        if not HAVE_MATPLOTLIB:
+            print("  visualisation skipped: matplotlib is not installed")
+            return None
+
+        loader = self.val_loader or self.train_loader
+        try:
+            batch = next(iter(loader))
+        except StopIteration:                            # pragma: no cover
+            return None
+
+        was_training = self.model.training
+        self.model.eval()
+        views = self._prepare(batch, augment=False)
+        outputs = self.model(views["clean_left"], views["clean_right"], directions=("left",))
+        disparity = outputs["left"]["disparity"]
+        confidence = outputs["left"]["confidence"]
+        if was_training:
+            self.model.train()
+
+        directory = os.path.join(self.config.training.output_dir, "visualizations")
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, f"epoch_{epoch:04d}.png")
+
+        count = min(self.config.training.visualize_samples, disparity.shape[0])
+        panels = {}
+        for index in range(count):
+            suffix = f" [{index}]" if count > 1 else ""
+            panels[f"left{suffix}"] = to_numpy_image(views["clean_left"][index:index + 1])
+            panels[f"right{suffix}"] = to_numpy_image(views["clean_right"][index:index + 1])
+            panels[f"disparity{suffix}"] = colorize(disparity[index])
+            # Confidence comes free from the same forward pass and is the clearest
+            # early warning of the matchability head collapsing to "certain everywhere".
+            panels[f"confidence{suffix}"] = colorize(confidence[index], 0.0, 1.0, cmap="viridis")
+        save_evaluation_figure(
+            path, panels,
+            title=f"epoch {epoch}  |  disparity min {float(disparity.min()):.1f} "
+                  f"max {float(disparity.max()):.1f} mean {float(disparity.mean()):.1f} px "
+                  f"(model range 0..{self.model.max_disparity})")
+        print(f"  visualisation -> {path}")
+        return path
 
     # -- logging -------------------------------------------------------------- #
 

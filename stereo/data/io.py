@@ -132,7 +132,7 @@ def read_middlebury_calib(path: str) -> Dict[str, float]:
     return calib
 
 
-def read_kitti_calib(path: str) -> Dict[str, float]:
+def read_kitti_calib(path: str, cameras: Tuple[int, int] = (2, 3)) -> Dict[str, float]:
     """Parse a KITTI stereo ``calib.txt`` / ``calib_cam_to_cam.txt`` style file.
 
     Handles the 2012/2015 ``calib_cam_to_cam`` form (``P_rect_0x``) and the
@@ -150,8 +150,16 @@ def read_kitti_calib(path: str) -> Dict[str, float]:
             if len(numbers) == 12:
                 matrices[key.strip()] = np.array([float(n) for n in numbers]).reshape(3, 4)
 
-    left_key = next((k for k in ("P_rect_02", "P2", "P_rect_00", "P0") if k in matrices), None)
-    right_key = next((k for k in ("P_rect_03", "P3", "P_rect_01", "P1") if k in matrices), None)
+    # ``cameras`` selects which pair of projection matrices describes the views in
+    # use: (2, 3) for the colour cameras, (0, 1) for the grayscale ones.
+    left_index, right_index = cameras
+    left_key = next((k for k in (f"P_rect_{left_index:02d}", f"P{left_index}") if k in matrices), None)
+    right_key = next((k for k in (f"P_rect_{right_index:02d}", f"P{right_index}") if k in matrices), None)
+    if left_key is None or right_key is None:   # fall back to whatever pair exists
+        left_key = left_key or next((k for k in ("P_rect_02", "P2", "P_rect_00", "P0")
+                                     if k in matrices), None)
+        right_key = right_key or next((k for k in ("P_rect_03", "P3", "P_rect_01", "P1")
+                                       if k in matrices), None)
     if left_key is None or right_key is None:
         return {}
 
