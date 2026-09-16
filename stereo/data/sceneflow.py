@@ -36,7 +36,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from .base import DatasetMode, StereoDataset
-from .discovery import common_ancestor, describe_tree, find_view_dir_pairs
+from .discovery import (common_ancestor, describe_missing_stereo, describe_tree,
+                        find_view_dir_pairs)
 from .io import read_image, read_middlebury_disparity
 
 #: Scene Flow renders with a virtual camera of focal length 1050 px (35 mm lens)
@@ -281,8 +282,10 @@ def discover_sceneflow(root: str, split: str = "TRAIN", pass_name: Optional[str]
     if layouts:
         return sorted(layouts, key=_rank)[0]
 
+    explanation = describe_missing_stereo(root)
     raise FileNotFoundError(
-        f"could not find a Scene Flow layout for split {split!r} under {root}.\n"
+        (explanation + "\n\n" if explanation else "")
+        + f"could not find a Scene Flow layout for split {split!r} under {root}.\n"
         f"Looked for a directory named frames_* / image_clean / image_final containing "
         f"left+right image folders at any depth"
         f"{f' (restricted to subset {subset!r})' if subset else ''}"

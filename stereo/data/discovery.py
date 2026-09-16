@@ -108,6 +108,47 @@ def find_view_dir_pairs(root: str, view_pairs: Sequence[Tuple[str, str]] = VIEW_
     return sorted(found)
 
 
+def find_unpaired_views(root: str, view_pairs: Sequence[Tuple[str, str]] = VIEW_DIR_PAIRS,
+                        max_depth: int = MAX_SEARCH_DEPTH) -> List[Tuple[str, str, str]]:
+    """Directories holding ONE view of a pair but not the other.
+
+    The single most useful thing to report when no stereo pair is found: a tree
+    with ``image_02`` but no ``image_03``, or ``left`` but no ``right``, is a
+    monocular dataset. Saying that outright is far more actionable than "no
+    layout found", because no amount of reconfiguring will make it stereo.
+
+    Returns ``[(directory, present_view, missing_view), ...]``.
+    """
+    found = []
+    for current in walk_dirs(root, max_depth, GROUND_TRUTH_DIR_NAMES):
+        children = set(subdirs(current))
+        for left, right in view_pairs:
+            for present, missing in ((left, right), (right, left)):
+                if present in children and missing not in children \
+                        and has_images(view_image_dir(current, present)):
+                    found.append((current, present, missing))
+    return sorted(found)
+
+
+def describe_missing_stereo(root: str) -> str:
+    """Explain why no stereo pair was found, as specifically as the tree allows."""
+    unpaired = find_unpaired_views(root)
+    if not unpaired:
+        return ""
+    views = sorted({f"{present} (without {missing})" for _, present, missing in unpaired})
+    lines = [f"Found {len(unpaired)} directories holding only ONE view of a stereo pair: "
+             + ", ".join(views) + ".",
+             "",
+             "That means this dataset is MONOCULAR -- it has no second camera, so it",
+             "cannot be used for stereo training at all. Stereo needs both views of the",
+             "same instant. Examples:"]
+    for directory, present, missing in unpaired[:3]:
+        lines.append(f"    {directory}  has {present}/, no {missing}/")
+    if len(unpaired) > 3:
+        lines.append(f"    ... and {len(unpaired) - 3} more")
+    return "\n".join(lines)
+
+
 def find_view_file_pairs(root: str, left_name: str, right_name: str,
                          max_depth: int = MAX_SEARCH_DEPTH) -> List[str]:
     """Every directory under ``root`` holding both named image files (Middlebury scenes)."""

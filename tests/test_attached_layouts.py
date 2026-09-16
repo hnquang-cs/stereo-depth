@@ -176,3 +176,31 @@ def test_view_image_dir_handles_the_kitti_raw_data_level(tmp_path):
     assert view_image_dir(str(tmp_path), "image_02").endswith("data")
     _png(str(tmp_path / "left" / "0.png"))
     assert not view_image_dir(str(tmp_path), "left").endswith("data")
+
+
+def test_monocular_dataset_is_named_as_such(tmp_path):
+    """A tree with image_02 but no image_03 is monocular, not a misconfigured
+    stereo tree. Saying so is the only actionable message: no reconfiguring can
+    produce a second camera that was never recorded."""
+    from stereo.data.discovery import describe_missing_stereo, find_unpaired_views
+
+    root = str(tmp_path)
+    for index in range(2):
+        _png(os.path.join(root, "drive_0001", "image_02", "data", f"{index:010d}.png"))
+    _png(os.path.join(root, "drive_0001", "proj_depth", "groundtruth", "0.png"))
+
+    unpaired = find_unpaired_views(root)
+    assert unpaired and unpaired[0][1:] == ("image_02", "image_03")
+    assert "MONOCULAR" in describe_missing_stereo(root)
+
+    with pytest.raises(RuntimeError) as error:
+        KittiStereoDataset(root, mode=DatasetMode.TRAIN)
+    message = str(error.value)
+    assert "MONOCULAR" in message
+    assert "image_02 (without image_03)" in message
+
+
+def test_a_genuine_stereo_tree_reports_no_unpaired_views(tmp_path):
+    from stereo.data.discovery import describe_missing_stereo
+    build_kitti_raw(str(tmp_path))
+    assert describe_missing_stereo(str(tmp_path)) == ""

@@ -29,7 +29,8 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 import numpy as np
 
 from .base import DatasetMode, StereoDataset
-from .discovery import (describe_tree, find_view_dir_pairs, paired_filenames, view_image_dir)
+from .discovery import (describe_missing_stereo, describe_tree, find_view_dir_pairs,
+                        paired_filenames, view_image_dir)
 from .io import read_image, read_kitti_calib, read_kitti_disparity
 
 #: Disparity directory per benchmark version and occlusion convention.
@@ -106,10 +107,12 @@ class KittiStereoDataset(StereoDataset):
         for candidate in ("2015", "2012", "raw"):
             if find_view_dir_pairs(root, [LAYOUT_VIEWS[candidate]], max_depth=6):
                 return candidate
+        explanation = describe_missing_stereo(root)
         raise RuntimeError(
-            f"could not identify a KITTI layout under {root}.\n"
+            f"could not identify a KITTI stereo layout under {root}.\n"
             f"Looked for any of {list(LAYOUT_VIEWS.values())} as sibling directories.\n\n"
-            f"What is actually there:\n{describe_tree(root)}")
+            + (explanation + "\n\n" if explanation else "")
+            + f"What is actually there:\n{describe_tree(root)}")
 
     def _index(self, reference_frames_only: bool) -> List[KittiEntry]:
         views = LAYOUT_VIEWS[self.version]
