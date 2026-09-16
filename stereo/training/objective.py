@@ -168,6 +168,16 @@ class LabelFreeObjective:
         logs["pseudo_valid_ratio"] = pseudo_valid_ratio
         logs["pseudo_scale"] = state.pseudo_scale
 
+        # ---- keep predictions inside the cost volume's search range --------- #
+        if self.weights.range_penalty > 0.0:
+            excess = sum(
+                torch.clamp(student_outputs[d]["disparity"] - max_disparity, min=0.0).mean()
+                for d in student_outputs) / max(len(student_outputs), 1)
+            # Normalised by the range so the term is scale-free across resolutions.
+            range_loss = excess / max(max_disparity, 1.0)
+            total = total + self.weights.range_penalty * range_loss
+            logs["range_penalty"] = float(range_loss.detach())
+
         disparity = student_outputs["left"]["disparity"].detach()
         logs["disparity_mean"] = float(disparity.mean())
         logs["disparity_min"] = float(disparity.min())

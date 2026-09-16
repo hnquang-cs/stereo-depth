@@ -48,9 +48,23 @@ def build_optimizer(model: nn.Module, config) -> torch.optim.Optimizer:
     raise ValueError(f"unknown optimizer {config.name!r}")
 
 
+#: A warm-up may never consume more than this fraction of the run. Warm-up
+#: lengths are configured in absolute iterations, which silently becomes a
+#: disaster on a small dataset: with 2 steps/epoch a 500-iteration warm-up
+#: outlasts a 30-epoch run, pinning the learning rate at a few percent of its
+#: configured value and leaving the model effectively untrained.
+MAX_WARMUP_FRACTION = 0.1
+
+
+def effective_warmup(configured: int, total_iterations: int) -> int:
+    """Clamp a warm-up to a sensible share of the actual run length."""
+    ceiling = max(1, int(total_iterations * MAX_WARMUP_FRACTION))
+    return max(0, min(configured, ceiling))
+
+
 def build_scheduler(optimizer, config, total_iterations: int):
     """Warm-up followed by the configured decay, as a per-iteration LambdaLR."""
-    warmup = max(config.warmup_iterations, 0)
+    warmup = effective_warmup(config.warmup_iterations, total_iterations)
 
     def factor(iteration: int) -> float:
         if warmup > 0 and iteration < warmup:
@@ -86,9 +100,16 @@ class Trainer:
 
         self.train_loader, self.val_loader = self._build_loaders()
         steps_per_epoch = self._steps_per_epoch()
+        self.total_iterations = steps_per_epoch * config.training.epochs
+        self.steps_per_epoch = steps_per_epoch
+        # Both warm-ups are clamped to the run length; see effective_warmup().
+        self.loss_warmup = effective_warmup(config.training.warmup_iterations,
+                                            self.total_iterations)
+        self.lr_warmup = effective_warmup(config.optimizer.warmup_iterations,
+                                          self.total_iterations)
         self.optimizer = build_optimizer(self.model, config.optimizer)
         self.scheduler = build_scheduler(self.optimizer, config.optimizer,
-                                         steps_per_epoch * config.training.epochs)
+                                         self.total_iterations)
         self.scaler = torch.amp.GradScaler(self.device.type,
                                            enabled=config.training.use_amp and self.device.type == "cuda")
 
@@ -207,7 +228,7 @@ class Trainer:
             state = ObjectiveState(
                 iteration=self.iteration,
                 epoch=epoch,
-                warmup_scale=0.0 if self.iteration < cfg.training.warmup_iterations else 1.0,
+                warmup_scale=0.0 if self.iteration < self.loss_warmup else 1.0,
                 pseudo_scale=pseudo_scale)
 
             teacher_outputs = None
@@ -274,6 +295,7 @@ class Trainer:
         cfg = self.config.training
         print(f"device={self.device}  parameters={self.model.num_parameters():,}  "
               f"num_disparities={self.model.num_disparities} (downsample={self.model.scale})")
+        self._report_schedule()
 
         last_path = os.path.join(cfg.output_dir, "last.pt")
         best_path = os.path.join(cfg.output_dir, "best.pt")
@@ -306,6 +328,28 @@ class Trainer:
         return best_path if os.path.exists(best_path) else last_path
 
     # -- logging -------------------------------------------------------------- #
+
+    def _report_schedule(self) -> None:
+        """State the actual schedule, and say so when the run is too small to train."""
+        samples = len(self.train_loader.dataset)
+        print(f"dataset={samples} pairs  steps/epoch={self.steps_per_epoch}  "
+              f"epochs={self.config.training.epochs}  total_iterations={self.total_iterations}")
+        for label, configured, effective in (
+                ("learning-rate warm-up", self.config.optimizer.warmup_iterations, self.lr_warmup),
+                ("loss warm-up", self.config.training.warmup_iterations, self.loss_warmup)):
+            note = ""
+            if effective != configured:
+                note = (f"  <- clamped from {configured}; it would otherwise outlast "
+                        f"{100 * MAX_WARMUP_FRACTION:.0f}% of the run")
+            print(f"  {label}: {effective} iterations{note}")
+
+        if self.total_iterations < 200:
+            print(f"\n  WARNING: only {self.total_iterations} optimiser steps in this entire run. "
+                  f"A {self.model.num_parameters():,}-parameter network trained from random "
+                  f"initialisation\n"
+                  f"  needs orders of magnitude more. With {samples} training pairs, raise "
+                  f"epochs, lower batch_size, or -- far better -- attach more data.\n"
+                  f"  Expect the result to be close to its initialisation, not a trained model.")
 
     def _log_iteration(self, epoch: int, step: int, steps: int, logs: Dict[str, float]) -> None:
         parts = [f"ep {epoch} [{step + 1}/{steps}]",

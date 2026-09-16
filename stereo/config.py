@@ -30,6 +30,13 @@ class LossWeights:
     #: Weight of the extra photometric/smoothness terms on the low-resolution
     #: (soft-argmin) disparity, which gives the cost volume a direct gradient.
     low_resolution: float = 0.5
+    #: Penalty on disparity predicted beyond the cost volume's search range.
+    #: The refinement head is an unbounded ``relu(base + residual)``, so nothing
+    #: in the architecture stops it emitting values the cost volume cannot
+    #: support -- a randomly initialised model was measured emitting 20778 px
+    #: against a 315 px range. Supervised training pulls those back via the
+    #: ground-truth loss; label-free training has no such anchor.
+    range_penalty: float = 0.1
 
 
 @dataclass

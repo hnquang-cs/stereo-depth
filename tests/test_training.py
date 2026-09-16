@@ -197,3 +197,89 @@ def test_trainer_runs_an_epoch_on_an_unlabeled_folder(unlabeled_dataset, tmp_pat
     payload = torch.load(best, map_location="cpu", weights_only=False)
     assert payload["extra"]["selection_is_label_free"] is True
     assert payload["model_config"]["num_disparities"] == 48
+
+
+# --------------------------------------------------------------------------- #
+# Schedule sanity on short runs
+# --------------------------------------------------------------------------- #
+
+def test_warmup_is_clamped_to_the_run_length():
+    """Warm-ups are configured in absolute iterations, which silently ruins a
+    short run: 500 warm-up iterations across a 60-iteration run pins the
+    learning rate at a few percent of its configured value forever, and leaves
+    the losses gated behind the warm-up permanently disabled."""
+    from stereo.training.loop import MAX_WARMUP_FRACTION, effective_warmup
+
+    # A long run keeps the configured value.
+    assert effective_warmup(500, 100_000) == 500
+    # A short run clamps it.
+    assert effective_warmup(500, 60) == max(1, int(60 * MAX_WARMUP_FRACTION))
+    assert effective_warmup(500, 60) < 60
+    # Never negative, never zero-length on a tiny run.
+    assert effective_warmup(0, 60) == 0
+    assert effective_warmup(500, 1) >= 1
+
+
+def test_short_run_actually_leaves_warmup_and_enables_the_losses(unlabeled_dataset, tmp_path):
+    """The reported failure: 2 steps/epoch x 30 epochs = 60 iterations, so the
+    learning rate never left warm-up and left-right consistency never switched
+    on. Both must now be active well before the run ends."""
+    from stereo.data.augmentation import GeometricAugmentConfig, PhotometricAugmentConfig, ResizeConfig
+    from stereo.data.registry import DatasetSpec
+    from stereo.training import Trainer
+
+    config = Config()
+    config.model = StereoNetConfig.for_width(96, downsample=4, backbone_width=4, feature_channels=4)
+    config.dynamic_disparity = False
+    config.data.train = [DatasetSpec(type="folder", root=unlabeled_dataset)]
+    config.data.resize = ResizeConfig(48, 96)
+    config.data.photometric_augmentation = PhotometricAugmentConfig(enabled=False)
+    config.data.geometric_augmentation = GeometricAugmentConfig(enabled=False)
+    config.training.epochs = 4
+    config.training.batch_size = 2
+    config.training.num_workers = 0
+    config.training.use_amp = False
+    config.training.output_dir = str(tmp_path / "out")
+    config.training.warmup_iterations = 500      # far longer than the whole run
+    config.optimizer.warmup_iterations = 500
+    config.teacher.enabled = False
+
+    trainer = Trainer(config, device=torch.device("cpu"))
+    assert trainer.total_iterations < 500, "this test must model a short run"
+    assert trainer.lr_warmup < trainer.total_iterations
+    assert trainer.loss_warmup < trainer.total_iterations
+
+    trainer.fit()
+
+    # The learning rate must have reached its configured value, not stayed at a
+    # few percent of it.
+    peak = max(record["train/lr"] for record in trainer.history)
+    assert peak > 0.5 * config.optimizer.learning_rate, f"lr never ramped: peak {peak:.2e}"
+
+    # And the left-right consistency term must actually have been applied.
+    assert any(record["train/left_right"] > 0 for record in trainer.history)
+
+
+def test_range_penalty_punishes_disparity_beyond_the_search_range():
+    """The refinement head is an unbounded relu(base + residual); nothing in the
+    architecture stops it emitting disparities the cost volume cannot support."""
+    from stereo.config import LossWeights, TeacherConfig
+    from stereo.training import LabelFreeObjective, ObjectiveState
+
+    objective = LabelFreeObjective(LossWeights(range_penalty=1.0), TeacherConfig(enabled=False))
+    left, right = torch.rand(1, 3, 32, 96), torch.rand(1, 3, 32, 96)
+    images = {"left": left, "right": right}
+
+    def penalty_for(value):
+        outputs = {d: {"disparity": torch.full((1, 1, 32, 96), value),
+                       "disparity_small": torch.full((1, 1, 8, 24), value / 4),
+                       "matchability": torch.full((1, 1, 8, 24), -0.1)}
+                   for d in ("left", "right")}
+        result = objective(outputs, images, ObjectiveState(warmup_scale=1.0), None,
+                           max_disparity=100.0)
+        return result["logs"].get("range_penalty", 0.0)
+
+    assert penalty_for(50.0) == 0.0, "inside the range costs nothing"
+    assert penalty_for(100.0) == 0.0
+    assert penalty_for(200.0) > 0.0, "beyond the range must be penalised"
+    assert penalty_for(400.0) > penalty_for(200.0), "penalty must grow with the excess"
