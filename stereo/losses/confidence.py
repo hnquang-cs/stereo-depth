@@ -60,10 +60,18 @@ class ConfidenceLoss(nn.Module):
             # pixels inside each cost-volume cell, which is the right soft target.
             target = F.interpolate(target, size=matchability.shape[-2:], mode="area")
 
-        confidence = torch.exp(matchability).clamp(self.eps, 1.0 - self.eps)
-        loss = F.binary_cross_entropy(confidence, target.clamp(0.0, 1.0))
+        # Computed in float32, outside autocast, for two reasons:
+        #   * torch bans binary_cross_entropy under autocast outright (it is
+        #     numerically unsafe in half precision and raises a RuntimeError),
+        #   * exp() of a float16 matchability loses precision exactly where it
+        #     matters, near 0, where confidence approaches 1.
+        # This mirrors how the cost volume, soft argmin and matchability layers
+        # already force float32 under mixed precision.
+        with torch.autocast(device_type=matchability.device.type, enabled=False):
+            confidence = torch.exp(matchability.float()).clamp(self.eps, 1.0 - self.eps)
+            loss = F.binary_cross_entropy(confidence, target.float().clamp(0.0, 1.0))
         return {
             "loss": loss,
             "mean_confidence": confidence.mean().detach(),
-            "mean_reliability": target.mean().detach(),
+            "mean_reliability": target.float().mean().detach(),
         }

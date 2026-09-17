@@ -1,5 +1,6 @@
 """Losses: photometric, smoothness, consistency, pseudo-labels, confidence."""
 
+import numpy as np
 import pytest
 import torch
 
@@ -135,3 +136,33 @@ def test_confidence_target_is_detached():
     ConfidenceLoss()(matchability, reliability)["loss"].backward()
     assert matchability.grad is not None
     assert reliability.grad is None
+
+
+def test_confidence_loss_is_autocast_safe():
+    """torch bans binary_cross_entropy under autocast, and the confidence loss is
+    the only site in this package that uses it.
+
+    The ban is raised by CUDA autocast, which cannot run here, so this test
+    pins the property that actually prevents it: the term is computed in
+    float32 regardless of the input dtype, which is what taking it outside
+    autocast achieves.
+    """
+    matchability = torch.log(torch.full((2, 1, 8, 8), 0.5)).half().requires_grad_(True)
+    reliability = torch.ones((2, 1, 8, 8), dtype=torch.half)
+
+    terms = ConfidenceLoss()(matchability, reliability)
+    assert terms["loss"].dtype == torch.float32, "must be computed in float32"
+    assert torch.isfinite(terms["loss"])
+
+    # And it must still be differentiable back into the half-precision input.
+    terms["loss"].backward()
+    assert matchability.grad is not None and torch.isfinite(matchability.grad).all()
+
+
+def test_confidence_loss_value_matches_bce_by_hand():
+    """Guard the float32 conversion against silently changing the number."""
+    probability = 0.25
+    matchability = torch.log(torch.full((1, 1, 4, 4), probability))
+    target = torch.ones((1, 1, 4, 4))
+    expected = -np.log(probability)            # BCE with target 1 is -log(p)
+    assert float(ConfidenceLoss()(matchability, target)["loss"]) == pytest.approx(expected, rel=1e-5)
