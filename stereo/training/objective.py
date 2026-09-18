@@ -119,13 +119,24 @@ class LabelFreeObjective:
         logs["smoothness"] = float(smoothness_loss.detach())
 
         # ---- left-right consistency --------------------------------------- #
+        # Normalised by the search range before weighting. The raw term is in
+        # PIXELS while the photometric term is an image residual in [0, 1], so
+        # weighting them against each other directly compares quantities two
+        # orders of magnitude apart -- and because a *constant* disparity field
+        # is perfectly left-right consistent (error exactly 0) while any real
+        # structured field is not, an oversized weight here does not merely
+        # dominate: it actively rewards collapsing the prediction to a constant.
+        # Monodepth avoids this by construction, its disparity being a fraction
+        # of image width; normalising restores that scale-free behaviour and
+        # makes the weight independent of resolution and disparity range.
         consistency = self.consistency(student_outputs["left"]["disparity"],
                                        student_outputs["right"]["disparity"])
         logs["left_right"] = float(consistency["loss"].detach())
+        consistency_normalised = consistency["loss"] / max(max_disparity, 1.0)
 
         total = (self.weights.photometric * photometric_loss
                  + self.weights.smoothness * smoothness_loss
-                 + state.warmup_scale * self.weights.left_right * consistency["loss"])
+                 + state.warmup_scale * self.weights.left_right * consistency_normalised)
 
         # ---- the same two terms at cost-volume resolution ----------------- #
         if self.weights.low_resolution > 0.0:
@@ -162,7 +173,9 @@ class LabelFreeObjective:
         pseudo_valid_ratio = 0.0
         if teacher_outputs is not None and state.pseudo_scale > 0.0 and self.weights.pseudo > 0.0:
             pseudo = self._pseudo_term(student_outputs, teacher_outputs, images, max_disparity)
-            total = total + state.pseudo_scale * self.weights.pseudo * pseudo["loss"]
+            # Also a pixel-scale quantity; normalised for the same reason.
+            pseudo_normalised = pseudo["loss"] / max(max_disparity, 1.0)
+            total = total + state.pseudo_scale * self.weights.pseudo * pseudo_normalised
             logs["pseudo"] = float(pseudo["loss"].detach())
             pseudo_valid_ratio = float(pseudo["valid_ratio"])
         logs["pseudo_valid_ratio"] = pseudo_valid_ratio

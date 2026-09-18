@@ -21,11 +21,23 @@ from .postprocess import PostProcessConfig
 
 @dataclass
 class LossWeights:
-    """Weights of the label-free objective.  There is no ground-truth term."""
+    """Weights of the label-free objective.  There is no ground-truth term.
+
+    The disparity-space terms (``left_right``, ``pseudo``, ``range_penalty``) are
+    applied to quantities **normalised by the disparity search range**, so these
+    weights mean the same thing at any resolution or disparity range. Without
+    that normalisation they are pixel-scale numbers being weighed against a
+    photometric residual in ``[0, 1]``, which is how a left-right weight of 0.5
+    ended up eight times stronger than the entire photometric signal and
+    collapsed training to a constant disparity field.
+    """
     photometric: float = 1.0
     smoothness: float = 0.1
-    left_right: float = 0.5
-    pseudo: float = 1.0
+    #: Applied to (left-right error / max_disparity): ~0.018 for a 5.5 px error
+    #: at a 315 px range, so 1.0 puts it near 10% of a typical photometric loss.
+    left_right: float = 1.0
+    #: Applied to (smooth-L1 teacher error / max_disparity).
+    pseudo: float = 10.0
     confidence: float = 0.05
     #: Weight of the extra photometric/smoothness terms on the low-resolution
     #: (soft-argmin) disparity, which gives the cost volume a direct gradient.

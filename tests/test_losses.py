@@ -166,3 +166,60 @@ def test_confidence_loss_value_matches_bce_by_hand():
     target = torch.ones((1, 1, 4, 4))
     expected = -np.log(probability)            # BCE with target 1 is -log(p)
     assert float(ConfidenceLoss()(matchability, target)["loss"]) == pytest.approx(expected, rel=1e-5)
+
+
+def test_a_constant_disparity_field_is_free_under_left_right_consistency():
+    """The reason an oversized left-right weight collapses training.
+
+    A constant field is *exactly* left-right consistent, while any real
+    structured field is not. So the term does not merely dominate when
+    over-weighted -- it rewards flatness.  This pins the fact, so the weighting
+    that depends on it is never changed by accident.
+    """
+    shape = (1, 1, 32, 128)
+    constant = torch.full(shape, 30.0)
+    assert float(LeftRightConsistencyLoss()(constant, constant)["loss"]) == pytest.approx(0.0, abs=1e-5)
+
+    torch.manual_seed(0)
+    structured_left = constant + torch.randn(shape) * 3.0
+    structured_right = constant + torch.randn(shape) * 3.0
+    assert float(LeftRightConsistencyLoss()(structured_left, structured_right)["loss"]) > 1.0
+
+
+def test_disparity_space_losses_are_normalised_by_the_search_range():
+    """left_right, pseudo and range_penalty are pixel-scale quantities weighed
+    against a photometric residual in [0, 1]. They must be divided by the search
+    range before weighting, or the weights mean different things at different
+    resolutions -- and a plausible-looking 0.5 becomes eight times the whole
+    photometric signal."""
+    from stereo.config import LossWeights, TeacherConfig
+    from stereo.training import LabelFreeObjective, ObjectiveState
+
+    torch.manual_seed(0)
+    left, right = torch.rand(1, 3, 32, 128), torch.rand(1, 3, 32, 128)
+    images = {"left": left, "right": right}
+
+    def total_for(max_disparity):
+        outputs = {}
+        for direction, value in (("left", 20.0), ("right", 26.0)):
+            outputs[direction] = {
+                "disparity": torch.full((1, 1, 32, 128), value),
+                "disparity_small": torch.full((1, 1, 8, 32), value / 4),
+                "matchability": torch.full((1, 1, 8, 32), -0.1),
+            }
+        objective = LabelFreeObjective(
+            LossWeights(photometric=0.0, smoothness=0.0, low_resolution=0.0,
+                        confidence=0.0, range_penalty=0.0, left_right=1.0),
+            TeacherConfig(enabled=False))
+        result = objective(outputs, images, ObjectiveState(warmup_scale=1.0), None,
+                           max_disparity=max_disparity)
+        return float(result["loss"]), result["logs"]["left_right"]
+
+    small_total, small_raw = total_for(100.0)
+    large_total, large_raw = total_for(400.0)
+
+    # The raw, reported error is the same -- it is a physical pixel quantity.
+    assert small_raw == pytest.approx(large_raw, rel=1e-5)
+    # But the contribution to the objective scales inversely with the range, so
+    # the same weight means the same thing regardless of the disparity range.
+    assert small_total == pytest.approx(4.0 * large_total, rel=1e-4)
