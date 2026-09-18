@@ -91,7 +91,9 @@ data:
 loss:
   photometric: 1.0
   smoothness: 0.1
-  left_right: 0.5
+  # 0.0 by default: measured to hurt monotonically (see LossWeights).
+  # Still used as a signal for occlusion detection and pseudo-label filtering.
+  left_right: 0.0
   pseudo: 1.0
   confidence: 0.05      # label-free matchability target; set 0.0 to disable
   low_resolution: 0.5   # the same photometric/smoothness terms on the soft-argmin output

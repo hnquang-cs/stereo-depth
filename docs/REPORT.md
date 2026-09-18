@@ -456,6 +456,43 @@ the weights nor which weights are kept.
 | Was the new model compared under the same protocol? | **No — Not measured.** No GPU or datasets here |
 | Can ground truth influence training in any code path? | **No** — verified structurally, behaviourally and statically |
 
+## 16b. Measured: the left-right consistency weight
+
+Reported after a first real training run produced a flat disparity map
+(min 0, max 37.7, mean 33.9 px).
+
+Two direct measurements explain it. With that run's logged values
+(photo 0.1953, lr_cons 5.5470 px), the left-right term at weight 0.5 was
+**93.4%** of the objective against photometric's 6.6% -- because it is a
+*pixel*-scale quantity weighed against an image residual in [0, 1]. And a
+constant disparity field is **exactly** left-right consistent (error 0.0000)
+while a realistically structured field scores 3.08, so an oversized weight does
+not merely dominate: it rewards flatness.
+
+Normalising the term by the disparity search range fixes the scale mismatch and
+makes the weight resolution-independent. It did **not** fix the collapse. A
+4-weight, 3-seed sweep on a synthetic pair with known disparity (true 4 -> 16 px,
+400 steps each) measured the term as monotonically harmful:
+
+| `left_right` | correlation with truth | photometric |
+|---:|---:|---:|
+| **0.0** | **+0.606 ± 0.054** | **0.0438** |
+| 0.25 | +0.360 ± 0.074 | 0.0448 |
+| 1.0 | +0.273 ± 0.083 | 0.0480 |
+| 4.0 | +0.144 ± 0.137 | 0.0507 |
+
+The default is therefore **0.0**, set from this measurement rather than from
+theory. A photometric-only control reached +0.748 correlation with the lowest
+photometric loss, confirming the core self-supervised machinery works.
+
+**Limits of this evidence.** One image pair, a deliberately small model, 400
+steps. No occlusions and no generalisation pressure -- exactly the conditions
+under which this regulariser would be expected to help. It may well help on real
+multi-image training; there is no evidence here either way, only evidence that it
+hurts on what could be measured. Left-right consistency remains implemented and
+is still used as a *signal* for occlusion detection and pseudo-label filtering,
+neither of which depends on the loss weight.
+
 ## 17. Limitations
 
 1. **No benchmark numbers.** Nothing about accuracy is claimed. Every component is tested;

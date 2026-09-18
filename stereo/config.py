@@ -33,9 +33,26 @@ class LossWeights:
     """
     photometric: float = 1.0
     smoothness: float = 0.1
-    #: Applied to (left-right error / max_disparity): ~0.018 for a 5.5 px error
-    #: at a 315 px range, so 1.0 puts it near 10% of a typical photometric loss.
-    left_right: float = 1.0
+    #: Applied to (left-right error / max_disparity).
+    #:
+    #: DEFAULT 0.0, set from measurement rather than from theory. A 4-weight,
+    #: 3-seed sweep on a synthetic pair with known disparity found this term
+    #: monotonically harmful -- correlation with the true disparity fell
+    #: 0.606 -> 0.360 -> 0.273 -> 0.144 for weights 0.0, 0.25, 1.0, 4.0, and the
+    #: photometric loss worsened alongside it. A constant disparity field is
+    #: *exactly* left-right consistent while any real field is not, so the term
+    #: rewards flatness, and nothing measured here offsets that.
+    #:
+    #: Caveat: that sweep is a single image pair with a deliberately small model
+    #: over 400 steps, which has no occlusions and no generalisation pressure --
+    #: precisely the conditions under which this regulariser would be expected to
+    #: earn its keep. It may well help on real multi-image training; there is
+    #: simply no evidence here that it does. Raise it if you can measure a gain.
+    #:
+    #: Left-right consistency is still computed and still used as a *signal* --
+    #: for occlusion detection and pseudo-label filtering -- neither of which
+    #: depends on this weight.
+    left_right: float = 0.0
     #: Applied to (smooth-L1 teacher error / max_disparity).
     pseudo: float = 10.0
     confidence: float = 0.05

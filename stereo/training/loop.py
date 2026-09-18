@@ -122,6 +122,7 @@ class Trainer:
 
         if config.training.resume:
             self._resume(config.training.resume)
+            self._restore_history()
 
     # -- setup -------------------------------------------------------------- #
 
@@ -173,6 +174,33 @@ class Trainer:
             self.teacher.load_state_dict(payload["teacher"])
             self.teacher.to(self.device)
         print(f"resumed from {path} at epoch {self.start_epoch}")
+
+    def _restore_history(self) -> None:
+        """Carry the previous session's curves forward.
+
+        Without this a resumed run writes a history.json containing only the new
+        epochs, so the plotted curves restart at the resume point and the earlier
+        training appears to have vanished. Also recovers the best label-free
+        score, so resuming cannot overwrite a better checkpoint with a worse one.
+        """
+        path = os.path.join(self.config.training.output_dir, "history.json")
+        if not os.path.isfile(path):
+            return
+        try:
+            with open(path) as handle:
+                previous = json.load(handle)
+        except (OSError, ValueError) as error:
+            print(f"  could not read {path}: {error}")
+            return
+
+        self.history = [record for record in previous
+                        if record.get("epoch", -1) < self.start_epoch]
+        metric = self.config.training.selection_metric
+        scores = [record[metric] for record in self.history if metric in record]
+        if scores:
+            self.best_metric = min(scores)
+        print(f"  restored {len(self.history)} earlier epochs from history.json"
+              + (f"; best {metric} so far {self.best_metric:.5f}" if scores else ""))
 
     # -- batch preparation --------------------------------------------------- #
 
