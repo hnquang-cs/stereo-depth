@@ -191,6 +191,21 @@ class LabelFreeObjective:
             total = total + self.weights.range_penalty * range_loss
             logs["range_penalty"] = float(range_loss.detach())
 
+        # How far the refinement moves the prediction away from the cost volume's
+        # own estimate. The cost volume is the only part that does actual stereo
+        # MATCHING; the refinement is a 2D network over the reference image, so if
+        # it overrides the coarse estimate wholesale the model is regressing
+        # disparity from appearance rather than matching, which reconstructs well
+        # while being geometrically wrong.
+        with torch.no_grad():
+            small = student_outputs["left"]["disparity_small"]
+            full = student_outputs["left"]["disparity"]
+            scale = full.shape[-1] / small.shape[-1]
+            base = F.interpolate(small, size=full.shape[-2:], mode="bilinear",
+                                 align_corners=RESIZE_ALIGN_CORNERS) * scale
+            logs["cost_volume_mean"] = float(base.mean())
+            logs["refine_delta"] = float((full - base).abs().mean())
+
         disparity = student_outputs["left"]["disparity"].detach()
         logs["disparity_mean"] = float(disparity.mean())
         logs["disparity_min"] = float(disparity.min())

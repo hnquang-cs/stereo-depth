@@ -50,6 +50,9 @@ class StereoNetConfig:
     backbone_width: int = 16
     cost_volume_channels: int = 4
     max_disparities_cap: int = 384
+    #: Bound on the refinement residual, as a fraction of the search range.
+    #: ``None`` reproduces the reference implementation's unbounded head.
+    residual_limit_fraction: Optional[float] = None
 
     @classmethod
     def for_width(cls, width: int, downsample: int = 4, max_disparities_cap: int = 384, **kwargs) -> "StereoNetConfig":
@@ -104,7 +107,9 @@ class StereoNet(nn.Module):
                                            self.config.cost_volume_channels)
         self.soft_argmin = SoftArgmin()
         self.matchability = Matchability()
-        self.refinement = DisparityRefinement(in_scale=scale)
+        limit = (self.config.residual_limit_fraction * self.max_disparity
+                 if self.config.residual_limit_fraction else None)
+        self.refinement = DisparityRefinement(in_scale=scale, residual_limit=limit)
 
         self.apply(_init_weights)
 

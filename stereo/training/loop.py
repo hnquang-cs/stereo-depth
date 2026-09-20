@@ -392,6 +392,9 @@ class Trainer:
         outputs = self.model(views["clean_left"], views["clean_right"], directions=("left",))
         disparity = outputs["left"]["disparity"]
         confidence = outputs["left"]["confidence"]
+        small = outputs["left"]["disparity_small"]
+        coarse = torch.nn.functional.interpolate(
+            small, size=disparity.shape[-2:], mode="bilinear", align_corners=False) * self.model.scale
         if was_training:
             self.model.train()
 
@@ -406,6 +409,10 @@ class Trainer:
             panels[f"left{suffix}"] = to_numpy_image(views["clean_left"][index:index + 1])
             panels[f"right{suffix}"] = to_numpy_image(views["clean_right"][index:index + 1])
             panels[f"disparity{suffix}"] = colorize(disparity[index])
+            # The cost volume's own estimate, before refinement. If this is flat
+            # or noise while the refined map looks detailed, the stereo matching
+            # is not working and the refinement is inventing the detail.
+            panels[f"cost volume{suffix}"] = colorize(coarse[index])
             # Confidence comes free from the same forward pass and is the clearest
             # early warning of the matchability head collapsing to "certain everywhere".
             panels[f"confidence{suffix}"] = colorize(confidence[index], 0.0, 1.0, cmap="viridis")
@@ -455,6 +462,8 @@ class Trainer:
         parts.append(f"d[{logs['disparity_min']:.1f},{logs['disparity_max']:.1f}] "
                      f"mean {logs['disparity_mean']:.2f}")
         parts.append(f"warp {logs['valid_warp_ratio']:.3f}")
+        if "refine_delta" in logs:
+            parts.append(f"cv {logs['cost_volume_mean']:.1f} refine{logs['refine_delta']:+.1f}")
         parts.append(f"lr {self.scheduler.get_last_lr()[0]:.2e}")
         print("  " + "  ".join(parts))
 

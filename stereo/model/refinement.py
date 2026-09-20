@@ -71,12 +71,22 @@ class DisparityRefinement(nn.Module):
         channels: ``(c1, c2, c3)`` widths of the three encoder stages.
     """
 
-    def __init__(self, in_scale: int, channels=(32, 64, 128)):
+    def __init__(self, in_scale: int, channels=(32, 64, 128),
+                 residual_limit: Optional[float] = None):
+        """Args:
+            residual_limit: if set, the refinement residual is squashed into
+                ``[-limit, +limit]`` with a tanh. The base disparity is already
+                bounded by the cost volume -- only the residual is free, and an
+                unbounded residual lets the head emit disparities the cost volume
+                cannot support, which are pure extrapolation. ``None`` keeps the
+                reference implementation's unbounded ``relu(base + residual)``.
+        """
         super().__init__()
         if in_scale not in (4, 8, 16):
             raise ValueError(f"in_scale must be 4, 8 or 16, got {in_scale}")
         c1, c2, c3 = channels
         self.in_scale = in_scale
+        self.residual_limit = residual_limit
 
         self.disparity_input = DisparityInputBlock(c1, in_scale)
         self.merge = nn.Sequential(
@@ -142,4 +152,7 @@ class DisparityRefinement(nn.Module):
         out = self.up_2x(out, None)
 
         residual = self.out(torch.cat([base_disparity, self.up_1x(out)], dim=1))
+        if self.residual_limit is not None:
+            # Saturating rather than clipped, so gradients survive at the bound.
+            residual = self.residual_limit * torch.tanh(residual / self.residual_limit)
         return self.relu(base_disparity + residual)
