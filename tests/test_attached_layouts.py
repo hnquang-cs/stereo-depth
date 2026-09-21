@@ -270,3 +270,32 @@ def test_a_genuine_stereo_tree_reports_no_unpaired_views(tmp_path):
     from stereo.data.discovery import describe_missing_stereo
     build_kitti_raw(str(tmp_path))
     assert describe_missing_stereo(str(tmp_path)) == ""
+
+
+# --------------------------------------------------------------------------- #
+# Rectification
+# --------------------------------------------------------------------------- #
+
+def test_rectification_check_passes_a_properly_rectified_pair():
+    """A horizontal-only shift is exactly what a rectified stereo pair is."""
+    from stereo.data.discovery import check_rectification
+    from tests.helpers import make_shifted_pair
+
+    left, right = make_shifted_pair(height=64, width=192, shift=8)
+    result = check_rectification(left, right)
+    assert result["rectified"] and result["vertical_offset"] == 0
+
+
+@pytest.mark.parametrize("offset", [2, 3, 5])
+def test_rectification_check_measures_a_vertical_offset(offset):
+    """Stereo searches horizontal scanlines only, so a vertical offset means the
+    correct match is not on the line being searched and training cannot recover."""
+    from stereo.data.discovery import check_rectification
+    from tests.helpers import make_shifted_pair
+
+    left, right = make_shifted_pair(height=64, width=192, shift=8)
+    # Dropping the top of the left view shifts its content UP relative to right,
+    # which is a negative offset by this function's convention.
+    result = check_rectification(left[..., offset:, :], right[..., :-offset, :])
+    assert not result["rectified"]
+    assert result["vertical_offset"] == -offset

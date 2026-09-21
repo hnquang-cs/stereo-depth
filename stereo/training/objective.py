@@ -162,13 +162,10 @@ class LabelFreeObjective:
         # paper's NSCE loss provides from ground truth and this derives from the
         # images alone.
         if self.weights.cost_volume > 0.0 and "cost" in student_outputs["left"]:
+            # Full-resolution images: the target is built by matching at full
+            # resolution and pooling down, never by matching downsampled images.
             cost = student_outputs["left"]["cost"]
-            cost_size = cost.shape[-2:]
-            cost_left = F.interpolate(left_image, size=cost_size, mode="bilinear",
-                                      align_corners=RESIZE_ALIGN_CORNERS)
-            cost_right = F.interpolate(right_image, size=cost_size, mode="bilinear",
-                                       align_corners=RESIZE_ALIGN_CORNERS)
-            cost_terms = self.cost_volume(cost, cost_left, cost_right, "left")
+            cost_terms = self.cost_volume(cost, left_image, right_image, "left")
             total = total + self.weights.cost_volume * cost_terms["loss"]
             logs["cost_volume_loss"] = float(cost_terms["loss"].detach())
             logs["cost_target_confidence"] = float(cost_terms["target_confidence"])

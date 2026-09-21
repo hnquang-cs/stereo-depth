@@ -82,12 +82,35 @@ def list_arrays(path: str) -> List[Tuple[str, Tuple[int, ...], str]]:
     return arrays
 
 
+def summarise_arrays(arrays: Sequence[Tuple[str, Tuple[int, ...], str]],
+                     max_groups: int = 8, examples: int = 1) -> List[str]:
+    """Group arrays by shape and dtype instead of listing them all.
+
+    A keyed container holds one array per image -- tens of thousands of them once
+    a dataset ships pre-augmented variants -- so listing every name buries the
+    one thing worth knowing: which shapes are present and how many of each.
+    """
+    groups: Dict[Tuple[Tuple[int, ...], str], List[str]] = {}
+    for name, shape, dtype in arrays:
+        groups.setdefault((shape, dtype), []).append(name)
+
+    lines = []
+    for (shape, dtype), names in sorted(groups.items(), key=lambda kv: -len(kv[1]))[:max_groups]:
+        lines.append(f"    {len(names):>7,} arrays  shape={shape}  dtype={dtype}")
+        for name in names[:examples]:
+            lines.append(f"            e.g. {name}")
+    if len(groups) > max_groups:
+        lines.append(f"    ... and {len(groups) - max_groups} more shape/dtype groups")
+    return lines
+
+
 def inspect_hdf5(root: str, max_files: int = 5) -> str:
     """Human-readable structure of the HDF5 file(s) under ``root``.
 
-    This is the cell to run when a container's contents are unknown: it is the
-    only way to learn what the arrays are called and what shape they are, which
-    is what the loader needs to pair the views.
+    Reports what the arrays look like and how many there are, which is what the
+    loader needs to pair the views. Arrays are grouped by shape and dtype rather
+    than listed individually, because a keyed container can hold tens of
+    thousands and the full listing floods the log.
     """
     files = find_hdf5_files(root)
     if not files:
@@ -104,13 +127,13 @@ def inspect_hdf5(root: str, max_files: int = 5) -> str:
             continue
         if not arrays:
             lines.append("  (no arrays)")
-        for name, shape, dtype in arrays:
-            lines.append(f"    {name:40s} shape={shape}  dtype={dtype}")
+            continue
+        lines.append(f"  {len(arrays):,} arrays in total:")
+        lines.extend(summarise_arrays(arrays))
         lines.append("")
-        lines.append("  How to read this:")
-        lines.append("    a stereo container needs two arrays of shape (N, H, W, 3) or")
-        lines.append("    (N, 3, H, W) -- one per view -- or one array with a length-2 axis.")
-        lines.append("    If nothing here looks like that, this file is not stereo imagery.")
+        lines.append("  A stereo container needs two image arrays -- one per view -- either as")
+        lines.append("  (N, H, W, 3) stacks, as one array with a length-2 view axis, or as one")
+        lines.append("  array per image paired by a 'left'/'right' marker in the name.")
     if len(files) > max_files:
         lines.append(f"... and {len(files) - max_files} more HDF5 files")
     return "\n".join(lines)

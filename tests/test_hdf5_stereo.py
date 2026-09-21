@@ -139,9 +139,28 @@ def test_inspect_reports_structure(tmp_path):
     write_h5(nested / "flying.hdf5", {"left": images(), "labels": np.arange(4)})
     report = inspect_hdf5(str(tmp_path))
     assert "flying.hdf5" in report
-    assert "left" in report and "(4, 32, 48, 3)" in report
-    assert "labels" in report
-    assert "How to read this" in report
+    assert "(4, 32, 48, 3)" in report
+    assert "stereo container" in report
+
+
+def test_inspect_summarises_rather_than_listing_every_array(tmp_path):
+    """A keyed container holds one array per image -- tens of thousands once a
+    dataset ships pre-augmented variants. Listing them all floods the log and
+    buries the shapes, which are the only thing worth reading."""
+    import h5py as _h5py
+    path = str(tmp_path / "many.hdf5")
+    with _h5py.File(path, "w") as handle:
+        for index in range(300):
+            handle.create_dataset(f"data/flying/left\\train/0000/aug_{index:04d}.png",
+                                  data=np.zeros((8, 8, 3), dtype=np.uint8))
+            handle.create_dataset(f"data/flying/right\\train/0000/aug_{index:04d}.png",
+                                  data=np.zeros((8, 8, 3), dtype=np.uint8))
+
+    report = inspect_hdf5(str(tmp_path))
+    assert "600 arrays in total" in report
+    assert "600 arrays  shape=(8, 8, 3)" in report
+    # The whole point: a few lines, not six hundred.
+    assert len(report.splitlines()) < 15, f"report is {len(report.splitlines())} lines"
 
 
 def test_inspect_when_there_is_no_hdf5(tmp_path):

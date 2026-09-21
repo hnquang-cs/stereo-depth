@@ -201,3 +201,56 @@ def describe_tree(root: str, max_depth: int = 4, max_entries: int = 10) -> str:
 
     walk(root, 1, "  ")
     return "\n".join(lines)
+
+
+def check_rectification(left, right, max_shift: int = 8) -> dict:
+    """Estimate the vertical offset between two views.
+
+    Stereo matching searches along horizontal scanlines only, so a rectified pair
+    must have zero vertical disparity. A pair that was augmented, cropped or
+    calibrated inconsistently can carry a vertical offset, and no amount of
+    training fixes that -- the correct match is simply not on the scanline being
+    searched.
+
+    Measured on per-row mean intensity rather than on the images directly. A
+    direct comparison is dominated by the *horizontal* disparity, which is the
+    thing being estimated elsewhere and is large; row means are almost invariant
+    to horizontal shift but move exactly with a vertical one.
+
+    Args:
+        left / right: ``(1, C, H, W)`` tensors or ``(H, W, C)`` arrays.
+    """
+    import numpy as np
+    import torch
+
+    def row_profile(image):
+        if isinstance(image, np.ndarray):
+            image = torch.from_numpy(np.ascontiguousarray(image))
+            if image.ndim == 3:
+                image = image.permute(2, 0, 1)
+        if image.ndim == 4:
+            image = image[0]
+        profile = image.float().mean(dim=(0, 2))          # (H,)
+        return profile - profile.mean()
+
+    a, b = row_profile(left), row_profile(right)
+    height = a.shape[0]
+    max_shift = min(max_shift, max(1, height // 4))
+
+    residuals = {}
+    for shift in range(-max_shift, max_shift + 1):
+        if shift == 0:
+            x, y = a, b
+        elif shift > 0:
+            x, y = a[shift:], b[: height - shift]
+        else:
+            x, y = a[: height + shift], b[-shift:]
+        residuals[shift] = float((x - y).abs().mean())
+
+    best = min(residuals, key=residuals.get)
+    return {
+        "vertical_offset": best,
+        "residuals": residuals,
+        "rectified": best == 0,
+        "margin": residuals[0] - residuals[best],
+    }
