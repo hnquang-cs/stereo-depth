@@ -186,3 +186,43 @@ def test_postprocess_disabled_is_a_no_op():
                                             PostProcessConfig(enabled=False))
     assert torch.equal(filtered, disparity)
     assert float(valid.mean()) == 1.0
+
+
+def test_max_samples_caps_a_dataset(tmp_path):
+    """MAX_TRAIN_SAMPLES in the notebook maps onto DatasetSpec.max_samples."""
+    root = make_folder(str(tmp_path), count=20)
+    spec = DatasetSpec(type="folder", root=root, max_samples=5)
+    dataset, _, summary = build_training_datasets([spec], DatasetMode.TRAIN,
+                                                  ResizeConfig(48, 96), None, seed=0)
+    assert len(dataset) == 5
+    assert summary[0]["size"] == 5
+
+
+def test_max_samples_is_applied_after_fraction(tmp_path):
+    root = make_folder(str(tmp_path), count=20)
+    spec = DatasetSpec(type="folder", root=root, fraction=0.5, max_samples=3)
+    dataset, _, _ = build_training_datasets([spec], DatasetMode.TRAIN,
+                                            ResizeConfig(48, 96), None, seed=0)
+    assert len(dataset) == 3
+
+
+def test_max_samples_larger_than_the_dataset_is_harmless(tmp_path):
+    root = make_folder(str(tmp_path), count=3)
+    spec = DatasetSpec(type="folder", root=root, max_samples=100)
+    dataset, _, _ = build_training_datasets([spec], DatasetMode.TRAIN,
+                                            ResizeConfig(48, 96), None, seed=0)
+    assert len(dataset) == 3
+
+
+def test_caps_preserve_the_weighted_mixture(tmp_path):
+    """A total cap split by weight must keep the requested proportions."""
+    a = make_folder(str(tmp_path), count=40, name="a")
+    b = make_folder(str(tmp_path), count=40, name="b")
+    specs = [DatasetSpec(type="folder", root=a, weight=0.75, max_samples=30),
+             DatasetSpec(type="folder", root=b, weight=0.25, max_samples=10)]
+    dataset, weights, summary = build_training_datasets(specs, DatasetMode.TRAIN,
+                                                        ResizeConfig(48, 96), None, seed=0)
+    assert [entry["size"] for entry in summary] == [30, 10]
+    assert len(dataset) == 40
+    # Sampling weights still follow the configured shares, not the sizes.
+    assert float(weights[:30].sum()) == pytest.approx(0.75, abs=1e-6)

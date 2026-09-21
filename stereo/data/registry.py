@@ -47,6 +47,9 @@ class DatasetSpec:
     weight: float = 1.0
     #: Keep only the first ``fraction`` of the dataset (useful for quick runs).
     fraction: float = 1.0
+    #: Hard cap on the number of pairs taken from this dataset. Applied after
+    #: ``fraction``. ``None`` means no cap.
+    max_samples: Optional[int] = None
     #: Extra keyword arguments forwarded to the dataset class (``split``, ``version``, ...).
     options: Dict[str, Any] = field(default_factory=dict)
 
@@ -85,6 +88,8 @@ def build_training_datasets(specs: Sequence[DatasetSpec], mode: DatasetMode,
         if spec.fraction < 1.0:
             keep = max(1, int(round(len(dataset) * spec.fraction)))
             dataset = Subset(dataset, range(keep))
+        if spec.max_samples is not None and len(dataset) > spec.max_samples:
+            dataset = Subset(dataset, range(max(1, spec.max_samples)))
         datasets.append(dataset)
         weights.append(spec.weight)
         summary.append({"name": spec.type, "root": spec.root, "size": len(dataset), "weight": spec.weight})
