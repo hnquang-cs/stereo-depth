@@ -59,6 +59,14 @@ class LossWeights:
     #: Weight of the extra photometric/smoothness terms on the low-resolution
     #: (soft-argmin) disparity, which gives the cost volume a direct gradient.
     low_resolution: float = 0.5
+    #: Cross-entropy from the network's cost volume to a photometric target.
+    #: This is the label-free stand-in for the paper's NSCE loss, which anchors
+    #: the cost volume at the ground-truth disparity. Without something in this
+    #: role the cost volume receives only the indirect "move the mean" gradient
+    #: through soft-argmin, and was measured not to learn at all: the coarse
+    #: disparity sat at the midpoint of its search range while the refinement
+    #: reduced the photometric loss by other means.
+    cost_volume: float = 1.0
     #: Penalty on disparity predicted beyond the cost volume's search range.
     #: The refinement head is an unbounded ``relu(base + residual)``, so nothing
     #: in the architecture stops it emitting values the cost volume cannot

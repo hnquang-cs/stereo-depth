@@ -42,8 +42,8 @@ import torch.nn.functional as F
 
 from ..config import LossWeights, TeacherConfig
 from ..geometry import RESIZE_ALIGN_CORNERS
-from ..losses import (ConfidenceLoss, LeftRightConsistencyLoss, PhotometricLoss, PseudoLabelLoss,
-                      SmoothnessLoss, build_pseudo_label_mask)
+from ..losses import (ConfidenceLoss, CostVolumeLoss, LeftRightConsistencyLoss, PhotometricLoss,
+                      PseudoLabelLoss, SmoothnessLoss, build_pseudo_label_mask)
 
 
 @dataclass
@@ -69,6 +69,7 @@ class LabelFreeObjective:
         self.consistency = LeftRightConsistencyLoss()
         self.pseudo = PseudoLabelLoss()
         self.confidence = ConfidenceLoss()
+        self.cost_volume = CostVolumeLoss()
         self.lr_occlusion_threshold = lr_occlusion_threshold
 
     # -- individual terms --------------------------------------------------- #
@@ -153,6 +154,25 @@ class LabelFreeObjective:
             logs["photometric_small"] = float(small_photometric.detach())
             total = total + self.weights.low_resolution * (
                 self.weights.photometric * small_photometric + self.weights.smoothness * small_smoothness)
+
+        # ---- shape the cost volume from photometric evidence --------------- #
+        # The cost volume is the only part that performs actual stereo matching.
+        # Its gradient through soft-argmin only says "move the expected
+        # disparity"; this says "the match is at index k", which is what the
+        # paper's NSCE loss provides from ground truth and this derives from the
+        # images alone.
+        if self.weights.cost_volume > 0.0 and "cost" in student_outputs["left"]:
+            cost = student_outputs["left"]["cost"]
+            cost_size = cost.shape[-2:]
+            cost_left = F.interpolate(left_image, size=cost_size, mode="bilinear",
+                                      align_corners=RESIZE_ALIGN_CORNERS)
+            cost_right = F.interpolate(right_image, size=cost_size, mode="bilinear",
+                                       align_corners=RESIZE_ALIGN_CORNERS)
+            cost_terms = self.cost_volume(cost, cost_left, cost_right, "left")
+            total = total + self.weights.cost_volume * cost_terms["loss"]
+            logs["cost_volume_loss"] = float(cost_terms["loss"].detach())
+            logs["cost_target_confidence"] = float(cost_terms["target_confidence"])
+            logs["cost_supervised_ratio"] = float(cost_terms["supervised_ratio"])
 
         # ---- label-free matchability supervision -------------------------- #
         if self.weights.confidence > 0.0 and state.warmup_scale > 0.0:
