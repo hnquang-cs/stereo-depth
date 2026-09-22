@@ -113,12 +113,14 @@ def test_objective_requires_no_ground_truth_argument():
     """The objective's signature has nowhere to put a label."""
     import inspect
     parameters = set(inspect.signature(LabelFreeObjective.__call__).parameters)
-    # valid_mask says which rows of a ragged, aspect-preserving batch are real
-    # padding and which are image. It comes from image SHAPES, never from
-    # disparity, so it carries no label. Any further parameter must be justified
-    # the same way before being added here.
+    # Two non-label additions, each justified before being allowed here:
+    #   valid_mask  -- which rows of a ragged, aspect-preserving batch are real
+    #                  image and which are padding. Derived from image SHAPES,
+    #                  never from disparity.
+    #   diagnostics -- a bool that turns on logging-only terms. Carries no data.
+    # Any further parameter must be justified the same way.
     assert parameters == {"self", "student_outputs", "images", "state", "teacher_outputs",
-                          "max_disparity", "valid_mask"}
+                          "max_disparity", "valid_mask", "diagnostics"}
 
 
 # --------------------------------------------------------------------------- #
@@ -343,3 +345,38 @@ def test_visualisation_can_be_disabled(unlabeled_dataset, tmp_path):
 
     Trainer(config, device=torch.device("cpu")).fit()
     assert not (tmp_path / "out" / "visualizations").exists()
+
+
+def test_cost_volume_loss_is_logged_even_when_its_weight_is_zero():
+    """The clearest read on whether the cost volume is matching must not vanish
+    exactly when the term is switched off -- which is when it matters most."""
+    import torch
+
+    from stereo.config import LossWeights, TeacherConfig
+    from stereo.model import StereoNet, StereoNetConfig
+    from stereo.training import LabelFreeObjective, ObjectiveState
+
+    torch.manual_seed(0)
+    net = StereoNet(StereoNetConfig(num_disparities=32)).eval()
+    left, right = torch.rand(1, 3, 64, 128), torch.rand(1, 3, 64, 128)
+    outputs = net(left, right, directions=("left", "right"))
+    objective = LabelFreeObjective(LossWeights.monodepth(), TeacherConfig(enabled=False))
+    common = dict(state=ObjectiveState(warmup_scale=1.0), teacher_outputs=None, max_disparity=30.0)
+
+    assert objective.weights.cost_volume == 0.0
+    quiet = objective(outputs, {"left": left, "right": right}, **common)
+    assert "cost_volume_loss" not in quiet["logs"], "it must not be paid for by default"
+
+    loud = objective(outputs, {"left": left, "right": right}, diagnostics=True, **common)
+    assert "cost_volume_loss" in loud["logs"]
+    # Logging only: it must not change the objective.
+    assert float(loud["loss"]) == float(quiet["loss"])
+
+
+def test_monodepth_preset_matches_the_paper():
+    from stereo.config import LossWeights
+
+    weights = LossWeights.monodepth()
+    assert (weights.photometric, weights.left_right, weights.smoothness) == (1.0, 1.0, 0.1)
+    for unused in ("pseudo", "confidence", "cost_volume", "range_penalty", "low_resolution"):
+        assert getattr(weights, unused) == 0.0, f"{unused} is not part of the Monodepth objective"

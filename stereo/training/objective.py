@@ -102,7 +102,8 @@ class LabelFreeObjective:
                  state: ObjectiveState,
                  teacher_outputs: Optional[Dict[str, Dict[str, torch.Tensor]]] = None,
                  max_disparity: float = 1e9,
-                 valid_mask: Optional[torch.Tensor] = None) -> Dict[str, Any]:
+                 valid_mask: Optional[torch.Tensor] = None,
+                 diagnostics: bool = False) -> Dict[str, Any]:
         """Args:
             student_outputs: ``{"left": {...}, "right": {...}}`` from the student.
             images: ``{"left", "right"}`` -- the **clean** (un-jittered) pair,
@@ -115,6 +116,13 @@ class LabelFreeObjective:
                 collate padded a ragged (aspect-preserving) batch with. Without
                 it the padded rows are free to match each other perfectly, which
                 would reward the network for whatever it does there.
+            diagnostics: also compute terms whose weight is 0, for logging only.
+                Used for the cost-volume loss, which is the clearest read on
+                whether the cost volume is matching at all and which would
+                otherwise disappear from the logs exactly when it is switched
+                off. It costs ~89% of a forward pass, so the caller decides when
+                to pay for it -- once per epoch on the validation pass, not
+                every step.
 
         Returns:
             ``{"loss": scalar, "logs": {...}, "aux": {...}}``.
@@ -177,13 +185,20 @@ class LabelFreeObjective:
         # disparity"; this says "the match is at index k", which is what the
         # paper's NSCE loss provides from ground truth and this derives from the
         # images alone.
-        if self.weights.cost_volume > 0.0 and "cost" in student_outputs["left"]:
+        want_cost = self.weights.cost_volume > 0.0 or diagnostics
+        if want_cost and "cost" in student_outputs["left"]:
             # Full-resolution images: the target is built by matching at full
             # resolution and pooling down, never by matching downsampled images.
             cost = student_outputs["left"]["cost"]
-            cost_terms = self.cost_volume(cost, left_image, right_image, "left",
-                                          valid_mask=self._resample_mask(valid_mask, cost))
-            total = total + self.weights.cost_volume * cost_terms["loss"]
+            if self.weights.cost_volume > 0.0:
+                cost_terms = self.cost_volume(cost, left_image, right_image, "left",
+                                              valid_mask=self._resample_mask(valid_mask, cost))
+                total = total + self.weights.cost_volume * cost_terms["loss"]
+            else:
+                # Diagnostic only: no weight, so no gradient and no graph.
+                with torch.no_grad():
+                    cost_terms = self.cost_volume(cost.detach(), left_image, right_image, "left",
+                                                  valid_mask=self._resample_mask(valid_mask, cost))
             logs["cost_volume_loss"] = float(cost_terms["loss"].detach())
             logs["cost_target_confidence"] = float(cost_terms["target_confidence"])
             logs["cost_supervised_ratio"] = float(cost_terms["supervised_ratio"])
