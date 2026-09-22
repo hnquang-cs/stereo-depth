@@ -113,8 +113,12 @@ def test_objective_requires_no_ground_truth_argument():
     """The objective's signature has nowhere to put a label."""
     import inspect
     parameters = set(inspect.signature(LabelFreeObjective.__call__).parameters)
+    # valid_mask says which rows of a ragged, aspect-preserving batch are real
+    # padding and which are image. It comes from image SHAPES, never from
+    # disparity, so it carries no label. Any further parameter must be justified
+    # the same way before being added here.
     assert parameters == {"self", "student_outputs", "images", "state", "teacher_outputs",
-                          "max_disparity"}
+                          "max_disparity", "valid_mask"}
 
 
 # --------------------------------------------------------------------------- #

@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset
 
 #: Keys that may appear in a benchmark sample and must never appear in a training one.
@@ -150,8 +151,29 @@ def collate_samples(samples: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     """
     batch: Dict[str, Any] = {}
     tensor_keys = [key for key in samples[0] if key != "metadata"]
+
+    # With an aspect-preserving resize the samples share a width but not a
+    # height, so they are padded to the batch maximum before stacking. The
+    # padding goes at the BOTTOM, which leaves every pixel's x coordinate -- and
+    # therefore its disparity -- untouched. ``valid_mask`` marks the real rows so
+    # the losses can ignore the rest.
+    heights = [sample[tensor_keys[0]].shape[-2] for sample in samples] if tensor_keys else []
+    pad_to = max(heights) if heights else 0
+    ragged = bool(heights) and min(heights) != pad_to
+
     for key in tensor_keys:
-        batch[key] = torch.stack([sample[key] for sample in samples], dim=0)
+        values = [sample[key] for sample in samples]
+        if ragged:
+            values = [F.pad(value, (0, 0, 0, pad_to - value.shape[-2]), mode="replicate")
+                      if value.shape[-2] < pad_to else value for value in values]
+        batch[key] = torch.stack(values, dim=0)
+
+    if ragged:
+        width = batch[tensor_keys[0]].shape[-1]
+        mask = torch.zeros(len(samples), 1, pad_to, width)
+        for index, height in enumerate(heights):
+            mask[index, :, :height] = 1.0
+        batch["valid_mask"] = mask
 
     metadata_keys = set()
     for sample in samples:

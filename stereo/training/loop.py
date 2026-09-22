@@ -227,6 +227,7 @@ class Trainer:
             "student_right": moved["right"],
             "clean_left": clean_left,
             "clean_right": clean_right,
+            "valid_mask": moved.get("valid_mask"),
             "metadata": moved["metadata"],
         }
 
@@ -269,7 +270,8 @@ class Trainer:
                                              directions=("left", "right"))
                 result = self.objective(student_outputs,
                                         {"left": views["clean_left"], "right": views["clean_right"]},
-                                        state, teacher_outputs, max_disparity=self.model.max_disparity)
+                                        state, teacher_outputs, max_disparity=self.model.max_disparity,
+                                        valid_mask=views.get("valid_mask"))
                 loss = result["loss"]
 
             self.optimizer.zero_grad(set_to_none=True)
@@ -311,7 +313,8 @@ class Trainer:
             outputs = self.model(views["clean_left"], views["clean_right"], directions=("left", "right"))
             state = ObjectiveState(iteration=self.iteration, epoch=epoch, warmup_scale=1.0, pseudo_scale=0.0)
             result = self.objective(outputs, {"left": views["clean_left"], "right": views["clean_right"]},
-                                    state, None, max_disparity=self.model.max_disparity)
+                                    state, None, max_disparity=self.model.max_disparity,
+                                    valid_mask=views.get("valid_mask"))
             for key, value in result["logs"].items():
                 totals[key] = totals.get(key, 0.0) + value
             count += 1

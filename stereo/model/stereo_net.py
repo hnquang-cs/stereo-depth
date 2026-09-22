@@ -60,10 +60,13 @@ class StereoNetConfig:
     #: scales the result back (:func:`stereo.model.predict_disparity`).
     canonical_width: int = 640
     #: Restrict the soft-argmin expectation to ``+/- window`` bins around the cost
-    #: minimum. ``None`` is the reference implementation's full expectation, which
-    #: was measured to be worse than a hard argmin at every temperature tried
-    #: (see :func:`stereo.model.cost_volume.soft_argmin`).
-    soft_argmin_window: Optional[int] = 2
+    #: minimum. ``None``, the reference implementation's full expectation, is the
+    #: default **because the restriction did not replicate end to end**: it is a
+    #: large win on the photometric cost volume (9.14 -> 6.84 px) but on a trained
+    #: network's own volume every read-out scores the same, and the full
+    #: expectation scored best of all (19.18 vs 20.26-20.42). See
+    #: :func:`stereo.model.cost_volume.soft_argmin` and docs/REPORT.md 16f.
+    soft_argmin_window: Optional[int] = None
 
     @classmethod
     def for_width(cls, width: int, downsample: int = 4, max_disparities_cap: int = 384, **kwargs) -> "StereoNetConfig":

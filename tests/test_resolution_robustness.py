@@ -183,3 +183,61 @@ def test_benchmark_uses_the_canonical_width_path():
     assert "model.forward_left(" not in source, (
         "evaluation must not call the model directly: that runs it at the "
         "benchmark's native resolution, not the width its range was declared at")
+
+
+# -- aspect-preserving batches ---------------------------------------------- #
+
+def test_resize_fixes_the_width_and_follows_the_source_aspect_ratio():
+    from stereo.data.augmentation import ResizeConfig, ResizeSample
+
+    resize = ResizeSample(ResizeConfig(width=640, preserve_aspect=True))
+    assert resize.target_height(375, 1242) == 192    # KITTI, ratio 3.31
+    assert resize.target_height(540, 960) == 352     # FlyingThings3D, ratio 1.78
+    assert resize.target_height(224, 224) == 640     # square stays square
+    for height, width in ((375, 1242), (540, 960), (500, 741)):
+        assert resize.target_height(height, width) % 16 == 0
+
+
+def test_ragged_batches_are_padded_at_the_bottom_with_a_validity_mask():
+    """Padding must go below the image, so no pixel's x coordinate moves."""
+    from stereo.data.base import collate_samples
+
+    samples = [{"left": torch.rand(3, 192, 640), "right": torch.rand(3, 192, 640), "metadata": {}},
+               {"left": torch.rand(3, 432, 640), "right": torch.rand(3, 432, 640), "metadata": {}}]
+    batch = collate_samples(samples)
+    assert batch["left"].shape == (2, 3, 432, 640)
+    assert batch["valid_mask"].shape == (2, 1, 432, 640)
+    assert float(batch["valid_mask"][0, 0, :192].min()) == 1.0
+    assert float(batch["valid_mask"][0, 0, 192:].max()) == 0.0
+    assert float(batch["valid_mask"][1].min()) == 1.0
+    # The real rows are untouched by the padding.
+    assert torch.equal(batch["left"][0, :, :192], samples[0]["left"])
+
+
+def test_uniform_batches_carry_no_mask():
+    """The common case must not pay for the ragged one."""
+    from stereo.data.base import collate_samples
+
+    samples = [{"left": torch.rand(3, 384, 640), "right": torch.rand(3, 384, 640), "metadata": {}}
+               for _ in range(2)]
+    assert "valid_mask" not in collate_samples(samples)
+
+
+def test_padded_rows_do_not_contribute_to_the_objective():
+    """Replicated padding matches itself perfectly, so it must be excluded."""
+    from stereo.config import LossWeights, TeacherConfig
+    from stereo.training import LabelFreeObjective, ObjectiveState
+
+    torch.manual_seed(0)
+    net = StereoNet(StereoNetConfig(num_disparities=32)).eval()
+    left, right = torch.rand(1, 3, 128, 256), torch.rand(1, 3, 128, 256)
+    outputs = net(left, right, directions=("left", "right"))
+
+    mask = torch.ones(1, 1, 128, 256)
+    mask[..., 96:, :] = 0.0
+    objective = LabelFreeObjective(LossWeights(), TeacherConfig(enabled=False))
+    common = dict(state=ObjectiveState(warmup_scale=1.0), teacher_outputs=None, max_disparity=100.0)
+    unmasked = objective(outputs, {"left": left, "right": right}, **common)
+    masked = objective(outputs, {"left": left, "right": right}, valid_mask=mask, **common)
+    assert float(masked["loss"]) != float(unmasked["loss"]), "the mask had no effect"
+    assert torch.isfinite(masked["loss"])

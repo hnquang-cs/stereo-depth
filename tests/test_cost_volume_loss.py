@@ -94,7 +94,11 @@ def test_the_loss_reads_no_ground_truth():
     for token in ("disparity_gt", "depth_gt", "valid_gt_mask"):
         assert token not in source
     parameters = set(inspect.signature(CostVolumeLoss.forward).parameters)
-    assert parameters == {"self", "cost", "reference", "source", "direction"}
+    # valid_mask is batch geometry -- which rows the collate padded onto a ragged
+    # aspect-preserving batch -- not a per-pixel label. It is derived from image
+    # SHAPES only, never from disparity. Any parameter beyond this set must be
+    # justified the same way before being added here.
+    assert parameters == {"self", "cost", "reference", "source", "direction", "valid_mask"}
 
 
 # --------------------------------------------------------------------------- #

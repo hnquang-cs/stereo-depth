@@ -22,7 +22,7 @@ images alone.
 
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -206,7 +206,8 @@ class CostVolumeLoss(nn.Module):
         self.window = window
 
     def forward(self, cost: torch.Tensor, reference: torch.Tensor, source: torch.Tensor,
-                direction: str = "left") -> Dict[str, torch.Tensor]:
+                direction: str = "left",
+                valid_mask: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         """Args:
             cost: ``(B, D, h, w)`` the network's aggregated cost volume.
             reference / source: images at **full** resolution. Matching is done
@@ -261,6 +262,12 @@ class CostVolumeLoss(nn.Module):
             # biased low regardless of the evidence. Supervising them teaches the
             # cost volume a ramp. Require the full search to have been available.
             weight = weight * (candidates >= num_disparities).to(cost.dtype)
+
+            # Rows the collate padded onto a ragged batch are replicated pixels:
+            # they match each other perfectly at every disparity, so they would
+            # otherwise contribute a confident, meaningless target.
+            if valid_mask is not None:
+                weight = weight * valid_mask.to(cost.dtype)
 
         log_probability = F.log_softmax(-cost, dim=1)
         per_pixel = -(target * log_probability).sum(dim=1, keepdim=True)

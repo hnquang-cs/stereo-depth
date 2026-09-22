@@ -657,12 +657,60 @@ it. `soft_argmin_window` defaults to 2; `None` restores the reference
 implementation's behaviour exactly, which
 `test_full_expectation_is_still_available` pins.
 
-**Limits of this evidence.** These numbers are from the *photometric* cost
-volume -- the target the learned volume is trained toward -- not from a trained
-network's own volume, which may be more unimodal. Treat the ranking as
-indicative of the estimator's robustness, not as a predicted end-to-end gain.
-The property it protects against matters most early in training, when the
-learned volume is close to random and therefore maximally multi-modal.
+### It did not replicate end to end, so the default is `None`
+
+The caveat above turned out to be the whole story. Read out of a *trained*
+network's own cost volume, on the same pair, every estimator scores the same:
+
+| read-out of the LEARNED volume | MAE |
+|---|---:|
+| hard argmin | 20.35 |
+| window = 1 | 20.26 |
+| window = 2 | 20.33 |
+| window = 4 | 20.42 |
+| **window = None (full expectation)** | **19.18** |
+
+A same-seed A/B through the training loop agreed: at step 800 the window gave
+coarse 20.10 / refined 19.37 against 20.19 / 16.16 for the full expectation --
+better on every label-free quantity (photo 0.1421 vs 0.1533, cost-volume loss
+0.726 vs 0.747) but worse on the metric that matters.
+
+The reason is in 16h: the learned volume correlates only **+0.349** with the
+photometric target it is trained toward, and its argmin agrees just **58.5%** of
+the time. The estimator cannot recover a disparity the volume does not encode,
+so sharpening the read-out changes nothing. `soft_argmin_window` therefore
+defaults to `None`. The option and its measurements are kept because the effect
+on a *correct* volume is real and large; it will matter once the volume is
+fixed, and not before.
+
+This is recorded as a change that was made, measured, and reverted.
+
+## 16h. Where the remaining error actually is
+
+The network converges to ~20 px coarse MAE on a single real pair after 1000
+steps, while block matching on the same photometric cost gets **4.33**. Two
+measurements localise the failure.
+
+**The learned volume does not match its target.** Correlation with the
+photometric cost volume is +0.349 per pixel and argmin agreement is 58.5%, so
+the cost-volume loss is not succeeding at the one thing it exists to do.
+
+**The other loss terms make it worse, not better.** Same seed, same 800 steps,
+only the weights change:
+
+| objective | coarse MAE | vs floor |
+|---|---:|---:|
+| cost-volume loss **only** | **14.10** | 3.3x |
+| cost-volume loss x10 | 15.10 | 3.4x |
+| full objective (current default) | ~20.1 | 4.6x |
+
+Training on the cost-volume term alone is substantially *better* than the full
+objective. The photometric, smoothness, low-resolution, confidence and range
+terms are, in aggregate, pulling the prediction away from the truth -- and
+raising the cost-volume weight does not buy the difference back.
+
+Neither of these is fixed. They are the next thing to work on, and no accuracy
+claim should be made until they are.
 
 ## 16g. Label-free calibration of the search range
 
@@ -685,6 +733,57 @@ For comparison, the `min(width // 2, 384)` rule recommends 320 for the same
 data. `test_calibration_reads_only_the_two_views` pins the label-free property
 by checking that a sample carrying a ground-truth key produces an identical
 answer.
+
+## 16i. The chosen training geometry and search range
+
+**Width is the only fixed dimension.** A horizontal resize scales disparity by
+the same factor; a vertical one does not change it at all. So fixing the width
+fixes what the search range means, and the height is free to follow each image's
+own aspect ratio. Samples therefore leave the transform at different heights and
+`collate_samples` pads them to the batch maximum **at the bottom** -- which
+leaves every pixel's x coordinate, and so its disparity, untouched -- emitting a
+`valid_mask` that the photometric and cost-volume terms honour. Replicated
+padding matches itself perfectly at every disparity, so without the mask it
+would contribute a confident, meaningless target.
+
+This also removes a train/test mismatch that was present: inference already
+preserved aspect ratio (`canonical_size`), while training squashed 1242x375
+KITTI to 640x384. The network was being shown two different geometries for the
+same scene.
+
+Resulting training heights at width 640: KITTI 192, FlyingThings3D 352,
+Middlebury 432, a square image 640.
+
+**The search range is 128 at a canonical width of 640** -- 20% of image width.
+Clipping is a hard failure (the model cannot represent the disparity at all)
+while an oversized range is a soft cost, so the rule is: the smallest range that
+covers the data.
+
+| dataset | native width | max disparity | at width 640 |
+|---|---:|---:|---:|
+| Middlebury (measured, `Motorcycle`) | 741 | 51.7 | **52** |
+| KITTI (published) | 1242 | ~192 | **~99** |
+| FlyingThings3D (standard protocol cap) | 960 | 192 | **128** |
+
+128 is the smallest value covering all three. What it costs, measured at
+640x384 on CPU:
+
+| `num_disparities` | params | cost volume | forward | Middlebury BM MAE |
+|---:|---:|---:|---:|---:|
+| 64 | 3,924,382 | 15.7 MB | 470 ms | 6.23 |
+| **128 (chosen)** | **4,272,046** | **31.5 MB** | **745 ms** | **7.44** |
+| 320 (what `min(width//2, 384)` gives) | 6,703,582 | 78.6 MB | 1607 ms | 10.83 |
+
+Against the old 320 that is **36% fewer parameters, 60% less cost-volume memory,
+2.2x faster and 31% more accurate** -- the lightweight/fast requirement and the
+accuracy requirement point the same way, with no trade-off between them.
+
+**Limits of this evidence.** Only the Middlebury number is measured, and on a
+single pair: `vision.middlebury.edu` was unreachable from this environment, so
+the multi-scene measurement was not made, and the KITTI and FlyingThings3D rows
+are published figures rather than something checked here. `DISPARITY_RANGE =
+"auto"` runs `calibrate_disparity_range` on the actual training mixture and
+should be preferred over this default when the data is to hand.
 
 ## 17. Limitations
 

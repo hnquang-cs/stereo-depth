@@ -74,15 +74,25 @@ class LabelFreeObjective:
 
     # -- individual terms --------------------------------------------------- #
 
-    def _photometric_pair(self, outputs, left_image, right_image, key="disparity"):
-        left_terms = self.photometric(left_image, right_image, outputs["left"][key], "left")
-        right_terms = self.photometric(right_image, left_image, outputs["right"][key], "right")
+    def _photometric_pair(self, outputs, left_image, right_image, key="disparity",
+                          valid_mask=None):
+        left_terms = self.photometric(left_image, right_image, outputs["left"][key], "left",
+                                      extra_mask=valid_mask)
+        right_terms = self.photometric(right_image, left_image, outputs["right"][key], "right",
+                                       extra_mask=valid_mask)
         return left_terms, right_terms
 
     def _smoothness_pair(self, outputs, left_image, right_image, key="disparity"):
         loss_left = self.smoothness(outputs["left"][key], left_image)
         loss_right = self.smoothness(outputs["right"][key], right_image)
         return 0.5 * (loss_left + loss_right)
+
+    @staticmethod
+    def _resample_mask(valid_mask, like):
+        """Nearest-resample a ``(B, 1, H, W)`` mask onto another map's grid."""
+        if valid_mask is None or valid_mask.shape[-2:] == like.shape[-2:]:
+            return valid_mask
+        return torch.nn.functional.interpolate(valid_mask, size=like.shape[-2:], mode="nearest")
 
     # -- full objective ----------------------------------------------------- #
 
@@ -91,7 +101,8 @@ class LabelFreeObjective:
                  images: Dict[str, torch.Tensor],
                  state: ObjectiveState,
                  teacher_outputs: Optional[Dict[str, Dict[str, torch.Tensor]]] = None,
-                 max_disparity: float = 1e9) -> Dict[str, Any]:
+                 max_disparity: float = 1e9,
+                 valid_mask: Optional[torch.Tensor] = None) -> Dict[str, Any]:
         """Args:
             student_outputs: ``{"left": {...}, "right": {...}}`` from the student.
             images: ``{"left", "right"}`` -- the **clean** (un-jittered) pair,
@@ -100,6 +111,10 @@ class LabelFreeObjective:
             teacher_outputs: teacher predictions, already detached, or ``None``.
             max_disparity: model's search-range bound, used to reject
                 out-of-range pseudo-labels.
+            valid_mask: ``(B, 1, H, W)``, 1 on real pixels and 0 on the rows the
+                collate padded a ragged (aspect-preserving) batch with. Without
+                it the padded rows are free to match each other perfectly, which
+                would reward the network for whatever it does there.
 
         Returns:
             ``{"loss": scalar, "logs": {...}, "aux": {...}}``.
@@ -108,7 +123,8 @@ class LabelFreeObjective:
         logs: Dict[str, float] = {}
 
         # ---- photometric reconstruction, full resolution ------------------ #
-        photo_left, photo_right = self._photometric_pair(student_outputs, left_image, right_image)
+        photo_left, photo_right = self._photometric_pair(student_outputs, left_image, right_image,
+                                                         valid_mask=valid_mask)
         photometric_loss = 0.5 * (photo_left["loss"] + photo_right["loss"])
         logs["photometric"] = float(photometric_loss.detach())
         logs["photometric_l1"] = float(0.5 * (photo_left["l1"] + photo_right["l1"]).detach())
@@ -165,7 +181,8 @@ class LabelFreeObjective:
             # Full-resolution images: the target is built by matching at full
             # resolution and pooling down, never by matching downsampled images.
             cost = student_outputs["left"]["cost"]
-            cost_terms = self.cost_volume(cost, left_image, right_image, "left")
+            cost_terms = self.cost_volume(cost, left_image, right_image, "left",
+                                          valid_mask=self._resample_mask(valid_mask, cost))
             total = total + self.weights.cost_volume * cost_terms["loss"]
             logs["cost_volume_loss"] = float(cost_terms["loss"].detach())
             logs["cost_target_confidence"] = float(cost_terms["target_confidence"])

@@ -114,28 +114,54 @@ class PhotometricAugment:
 
 @dataclass
 class ResizeConfig:
-    """Fixed resize applied per sample so that a batch is rectangular.
+    """Training resize: fixed width, with the aspect ratio preserved by default.
 
-    ``height`` and ``width`` are the *base* training resolution; the per-batch
-    geometric augmentation jitters around it.
+    Only the **width** is canonical, because only the width affects disparity: a
+    horizontal resize scales disparity by the same factor, a vertical one does
+    not change it at all. So fixing the width fixes what the search range means,
+    and the height is free to follow the source aspect ratio.
+
+    ``height`` is then a *fallback* used when ``preserve_aspect`` is off, and the
+    per-sample heights that come out of this are reconciled at batch level by
+    :func:`stereo.data.base.collate_samples`, which pads to the batch maximum and
+    emits a ``valid_mask``.
+
+    Why preserve the ratio: inference already does
+    (:func:`stereo.model.canonical_size`). Squashing 1242x375 KITTI to 640x384
+    during training and then running it at 640x193 shows the network two
+    different geometries for the same scene. Matching them removes that
+    train/test mismatch.
     """
     height: int = 384
     width: int = 640
+    preserve_aspect: bool = True
+    #: Heights are rounded to this so the encoder never pads internally.
+    size_divisor: int = 16
 
 
 class ResizeSample:
-    """Resize both views to a fixed size (no cropping).
+    """Resize both views to the configured width (no cropping).
 
-    Aspect ratio is intentionally not preserved: distorting it is one of the
-    requested augmentations, and a stereo network is not aspect-ratio sensitive
-    as long as both views are transformed identically.
+    With ``preserve_aspect`` the height follows the source ratio, so different
+    samples come out at different heights; the collate pads them together.
     """
 
     def __init__(self, config: ResizeConfig):
         self.config = config
 
+    def target_height(self, source_height: int, source_width: int) -> int:
+        if not self.config.preserve_aspect:
+            return self.config.height
+        scaled = source_height * self.config.width / max(source_width, 1)
+        divisor = self.config.size_divisor
+        return max(int(round(scaled / divisor)) * divisor, divisor)
+
     def __call__(self, sample: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
-        target = (self.config.width, self.config.height)  # cv2 takes (w, h)
+        reference = sample.get("left")
+        if reference is None:
+            return dict(sample)
+        height = self.target_height(reference.shape[0], reference.shape[1])
+        target = (self.config.width, height)  # cv2 takes (w, h)
         out = {}
         for key, value in sample.items():
             if isinstance(value, np.ndarray) and value.ndim >= 2:
@@ -192,7 +218,7 @@ class GeometricAugmentConfig:
     #: Output sizes are rounded to this multiple so no internal padding is needed.
     size_divisor: int = 16
     min_size: int = 64
-    keys: Tuple[str, ...] = ("left", "right", "left_clean", "right_clean")
+    keys: Tuple[str, ...] = ("left", "right", "left_clean", "right_clean", "valid_mask")
 
 
 class BatchGeometricAugment:
@@ -228,9 +254,13 @@ class BatchGeometricAugment:
 
         out = dict(batch)
         for key in self.config.keys:
-            if key in batch:
+            if key in batch and batch[key] is not None:
                 out[key] = F.interpolate(batch[key], size=(new_height, new_width),
                                          mode="bilinear", align_corners=RESIZE_ALIGN_CORNERS)
+        if out.get("valid_mask") is not None:
+            # Resampling a 0/1 mask bilinearly blurs its edge; re-binarise so a
+            # padded row never counts as partially real.
+            out["valid_mask"] = (out["valid_mask"] > 0.999).to(batch["left"].dtype)
         scale_x = new_width / width
         scale_y = new_height / height
         out["metadata"] = _rescale_metadata(batch.get("metadata", {}), scale_x, scale_y)
