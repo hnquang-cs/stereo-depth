@@ -155,3 +155,31 @@ def test_calibration_reads_only_the_two_views():
           "disparity": torch.full_like(left[:, :1], 999.0)}], canonical_width=640,
         search_fraction=0.4)
     assert plain.recommended == poisoned.recommended
+
+
+# -- evaluation ------------------------------------------------------------- #
+
+def test_evaluation_runs_at_the_canonical_width_not_the_benchmark_s_own():
+    """A benchmark image is scored at its native size, but *run* at the canonical
+    width, or the search range covers a different fraction of the image than the
+    model was trained on."""
+    from stereo.model import predict_left_disparity
+
+    net = StereoNet(StereoNetConfig(num_disparities=96, canonical_width=640)).eval()
+    # Middlebury-like native resolution, far from the training width.
+    out = predict_left_disparity(net, torch.rand(1, 3, 994, 1500), torch.rand(1, 3, 994, 1500))
+    assert out["disparity"].shape[-2:] == (994, 1500)
+    assert out["confidence"].shape[-2:] == (994, 1500)
+
+
+def test_benchmark_uses_the_canonical_width_path():
+    """Guard against a future edit reverting evaluation to a raw forward pass."""
+    import inspect
+
+    from stereo.evaluation import benchmark
+
+    source = inspect.getsource(benchmark)
+    assert "predict_left_disparity(model" in source
+    assert "model.forward_left(" not in source, (
+        "evaluation must not call the model directly: that runs it at the "
+        "benchmark's native resolution, not the width its range was declared at")

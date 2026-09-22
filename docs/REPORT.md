@@ -616,6 +616,18 @@ scales disparity by 640/1242 only; the vertical factor does not enter. The
 existing `BatchGeometricAugment` (scale 0.8-1.2, aspect 0.9-1.1) is what buys
 robustness to the appearance change.
 
+### Evaluation runs at the canonical width too
+
+`benchmark.py` previously called `model.forward_left` on whatever resolution the
+dataset produced. With a canonical-width model that is wrong: Middlebury's
+native images are 1500+ px wide, so a range declared at 640 would cover a
+different fraction of the image than the model ever saw, and the predicted
+values would be in the wrong units. Evaluation now goes through
+`predict_left_disparity`, which runs at the canonical width and scales back into
+the benchmark image's own pixels, so metrics stay in native pixels while the
+model sees what it was trained on. `test_benchmark_uses_the_canonical_width_path`
+guards against reverting it.
+
 `compute_num_disparities` and `StereoNetConfig.for_width` are retained -- the
 original specification requires the `min(width // 2, 384)` rule to exist in one
 place, and it is still the right *upper bound* -- but they are no longer the

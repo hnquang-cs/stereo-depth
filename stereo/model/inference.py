@@ -27,7 +27,7 @@ disparity -- so it is free, and the rest of the network is fully convolutional.
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict, Optional, Sequence
 
 import torch
 import torch.nn.functional as F
@@ -56,7 +56,8 @@ def canonical_size(height: int, width: int, canonical_width: int,
 @torch.no_grad()
 def predict_disparity(model, left: torch.Tensor, right: torch.Tensor,
                       canonical_width: Optional[int] = None,
-                      preserve_aspect: bool = True) -> Dict[str, torch.Tensor]:
+                      preserve_aspect: bool = True,
+                      directions: Optional[Sequence[str]] = None) -> Dict[str, torch.Tensor]:
     """Predict disparity for a stereo pair of any shape.
 
     The result is at the *input's* resolution and in the *input's* pixels, so it
@@ -70,6 +71,7 @@ def predict_disparity(model, left: torch.Tensor, right: torch.Tensor,
             ``canonical_width``, which is the width its search range was
             declared at.
         preserve_aspect: see :func:`canonical_size`.
+        directions: which views to predict. ``None`` uses the model's own default.
 
     Returns:
         ``{direction: {"disparity": (B, 1, H, W), "confidence": (B, 1, H, W)}}``.
@@ -85,7 +87,7 @@ def predict_disparity(model, left: torch.Tensor, right: torch.Tensor,
                                          align_corners=RESIZE_ALIGN_CORNERS)
         left, right = resize(left), resize(right)
 
-    outputs = model(left, right)
+    outputs = model(left, right) if directions is None else model(left, right, directions=directions)
 
     results = {}
     for direction, values in outputs.items():
@@ -100,3 +102,19 @@ def predict_disparity(model, left: torch.Tensor, right: torch.Tensor,
                                                 mode="bilinear", align_corners=RESIZE_ALIGN_CORNERS)
         results[direction] = entry
     return results
+
+
+@torch.no_grad()
+def predict_left_disparity(model, left: torch.Tensor, right: torch.Tensor,
+                           canonical_width: Optional[int] = None,
+                           preserve_aspect: bool = True) -> Dict[str, torch.Tensor]:
+    """:func:`predict_disparity` for the left view only.
+
+    Used by evaluation, which must run the model at the width its search range
+    was declared at and scale the result back into the benchmark image's own
+    pixels. Without it, a model trained at a canonical 640 px is scored at, say,
+    Middlebury's native 1500+ px, where its search range covers a different
+    fraction of the image than it ever saw during training.
+    """
+    return predict_disparity(model, left, right, canonical_width, preserve_aspect,
+                             directions=("left",))["left"]

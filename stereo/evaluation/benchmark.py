@@ -23,6 +23,7 @@ import torch
 from ..data import DatasetMode, DatasetSpec, build_benchmark_dataset, collate_samples
 from ..geometry import disparity_to_depth
 from ..model import StereoNet
+from ..model import predict_left_disparity
 from ..postprocess import PostProcessConfig, postprocess_disparity
 from .confidence_metrics import confidence_metrics
 from .depth_metrics import DepthAccumulator, depth_metrics, depth_valid_mask, median_scale_factor
@@ -84,7 +85,11 @@ def evaluate_checkpoint(model: StereoNet,
         left = batch["left"].to(device)
         right = batch["right"].to(device)
 
-        output = model.forward_left(left, right)
+        # Run at the width the search range was declared at, then scale back into
+        # this image's own pixels. Without this a model trained at a canonical
+        # 640 px is scored at the benchmark's native resolution, where its range
+        # covers a different fraction of the image than it ever saw.
+        output = predict_left_disparity(model, left, right)
         disparity = output["disparity"]
         confidence = output["confidence"]
 
