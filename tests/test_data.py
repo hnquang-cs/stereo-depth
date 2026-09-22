@@ -226,3 +226,51 @@ def test_caps_preserve_the_weighted_mixture(tmp_path):
     assert len(dataset) == 40
     # Sampling weights still follow the configured shares, not the sizes.
     assert float(weights[:30].sum()) == pytest.approx(0.75, abs=1e-6)
+
+
+def test_colour_jitter_matches_the_numpy_reference():
+    """The cv2 fast paths in _apply_jitter must be a speed change only.
+
+    cv2.pow / cv2.mean / cv2.transform replaced np.power / mean(axis=(0,1)) /
+    mean(axis=2) because colour jitter was 80-92% of per-sample loader CPU time
+    and was starving the GPU. This pins that the output did not move.
+    """
+    import numpy as np
+
+    from stereo.data.augmentation import _apply_jitter
+
+    def reference(image, params):
+        out = np.clip(image, 0.0, 1.0)
+        out = np.power(out, params["gamma"])
+        out = out * params["brightness"]
+        mean = out.mean(axis=(0, 1), keepdims=True)
+        out = (out - mean) * params["contrast"] + mean
+        grey = out.mean(axis=2, keepdims=True)
+        out = (out - grey) * params["saturation"] + grey
+        return np.clip(out, 0.0, 1.0).astype(np.float32)
+
+    rng = np.random.default_rng(0)
+    image = rng.random((48, 64, 3), dtype=np.float32)
+    for gamma, brightness, contrast, saturation in [(1.0, 1.0, 1.0, 1.0),
+                                                    (0.8, 1.1, 0.9, 1.2),
+                                                    (1.2, 0.9, 1.1, 0.8)]:
+        params = {"gamma": gamma, "brightness": brightness, "contrast": contrast,
+                  "saturation": saturation, "hue": 0.0}
+        fast, slow = _apply_jitter(image, params), reference(image, params)
+        assert np.abs(fast - slow).max() < 1e-5, (
+            f"gamma={gamma}: max difference {np.abs(fast - slow).max():.2e}")
+
+
+def test_colour_jitter_keeps_the_pair_consistent():
+    """Both views must get the SAME jitter, or brightness constancy breaks."""
+    import numpy as np
+
+    from stereo.data.augmentation import PhotometricAugment, PhotometricAugmentConfig
+
+    rng = np.random.default_rng(0)
+    image = rng.random((32, 48, 3), dtype=np.float32)
+    augment = PhotometricAugment(PhotometricAugmentConfig(enabled=True, probability=1.0,
+                                                          asymmetric_probability=0.0), seed=0)
+    out = augment({"left": image.copy(), "right": image.copy()})
+    assert np.abs(out["left"] - out["right"]).max() < 1e-6, "views were jittered differently"
+    assert np.abs(out["left_clean"] - image).max() == 0.0, "the clean view must be untouched"

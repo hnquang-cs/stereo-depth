@@ -123,9 +123,16 @@ def build_loader(dataset, batch_size: int, shuffle: bool = False, num_workers: i
                                         replacement=True, generator=generator)
         shuffle = False
 
+    # persistent_workers keeps the worker pool alive between epochs: without it
+    # every epoch pays process startup AND begins with a cold prefetch queue,
+    # which shows up as the GPU stalling at each epoch boundary.
+    # prefetch_factor deepens the queue so a slow sample does not stall the GPU.
+    extra = {}
+    if num_workers > 0:
+        extra = {"persistent_workers": True, "prefetch_factor": 4}
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, sampler=sampler,
                       num_workers=num_workers, collate_fn=collate_samples, drop_last=drop_last,
-                      pin_memory=torch.cuda.is_available(), generator=generator)
+                      pin_memory=torch.cuda.is_available(), generator=generator, **extra)
 
 
 def build_benchmark_dataset(spec: DatasetSpec) -> StereoDataset:
