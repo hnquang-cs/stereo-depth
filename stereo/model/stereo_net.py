@@ -53,6 +53,17 @@ class StereoNetConfig:
     #: Bound on the refinement residual, as a fraction of the search range.
     #: ``None`` reproduces the reference implementation's unbounded head.
     residual_limit_fraction: Optional[float] = None
+    #: Width at which ``num_disparities`` is expressed. Disparity scales linearly
+    #: with horizontal resize, so ``num_disparities / canonical_width`` -- not
+    #: ``num_disparities`` -- is the resize-invariant description of the search
+    #: range. Inference on an image of any other width resizes to this width and
+    #: scales the result back (:func:`stereo.model.predict_disparity`).
+    canonical_width: int = 640
+    #: Restrict the soft-argmin expectation to ``+/- window`` bins around the cost
+    #: minimum. ``None`` is the reference implementation's full expectation, which
+    #: was measured to be worse than a hard argmin at every temperature tried
+    #: (see :func:`stereo.model.cost_volume.soft_argmin`).
+    soft_argmin_window: Optional[int] = 2
 
     @classmethod
     def for_width(cls, width: int, downsample: int = 4, max_disparities_cap: int = 384, **kwargs) -> "StereoNetConfig":
@@ -105,13 +116,20 @@ class StereoNet(nn.Module):
         self.cost_volume = CorrelationCostVolume(self.num_disparities_small)
         self.aggregation = CostAggregation(self.config.feature_channels, self.num_disparities_small,
                                            self.config.cost_volume_channels)
-        self.soft_argmin = SoftArgmin()
+        self.soft_argmin = SoftArgmin(window=self.config.soft_argmin_window)
         self.matchability = Matchability()
         limit = (self.config.residual_limit_fraction * self.max_disparity
                  if self.config.residual_limit_fraction else None)
         self.refinement = DisparityRefinement(in_scale=scale, residual_limit=limit)
 
+        self.canonical_width = self.config.canonical_width
+        #: Search range as a fraction of image width -- the quantity that is
+        #: invariant under resizing, and the one to keep fixed across datasets.
+        self.max_disparity_fraction = self.num_disparities / self.canonical_width
+
         self.apply(_init_weights)
+        # After the generic init, so it is not overwritten by it.
+        self.refinement.zero_init_residual()
 
     # -- internals ---------------------------------------------------------- #
 

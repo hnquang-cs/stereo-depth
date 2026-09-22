@@ -29,8 +29,27 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+#: Side of the square window the matching cost is aggregated over. A single
+#: pixel's absolute difference matches equally well at dozens of disparities, so
+#: a per-pixel cost carries almost no information: measured on a real Middlebury
+#: pair, a 1x1 cost scored MAE 13.28 px against a true disparity of 2.2-18.1 --
+#: worse than predicting a constant (4.52 px). A 9x9 window scores 1.78 px.
+#: Every classical stereo matcher aggregates over a window; this is that.
+MATCH_WINDOW = 9
+
+
+def box_filter(values: torch.Tensor, window: int) -> torch.Tensor:
+    """Mean over a ``window x window`` neighbourhood, keeping the resolution."""
+    if window <= 1:
+        return values
+    pad = window // 2
+    return F.avg_pool2d(F.pad(values, (pad, pad, pad, pad), mode="replicate"),
+                        window, stride=1)
+
+
 def photometric_cost_volume(reference: torch.Tensor, source: torch.Tensor,
-                            num_disparities: int, direction: str = "left") -> torch.Tensor:
+                            num_disparities: int, direction: str = "left",
+                            window: int = MATCH_WINDOW) -> torch.Tensor:
     """Per-disparity photometric residual between the two views.
 
     ``volume[b, d, y, x]`` is the appearance mismatch when pixel ``x`` of the
@@ -62,14 +81,16 @@ def photometric_cost_volume(reference: torch.Tensor, source: torch.Tensor,
         else:
             shifted = F.pad(source[..., disparity:], (0, disparity))
             inside = F.pad(torch.ones_like(source[:, :1, :, disparity:]), (0, disparity))
-        costs.append(torch.abs(reference - shifted).mean(dim=1))
+        residual = torch.abs(reference - shifted).mean(dim=1, keepdim=True)
+        costs.append(box_filter(residual, window)[:, 0])
         valid.append(inside[:, 0])
     return torch.stack(costs, dim=1), torch.stack(valid, dim=1)
 
 
 def pooled_photometric_cost_volume(reference: torch.Tensor, source: torch.Tensor,
                                    num_disparities: int, scale: int,
-                                   direction: str = "left"):
+                                   direction: str = "left",
+                                   window: int = MATCH_WINDOW):
     """Photometric cost at the cost volume's resolution, built from FULL-resolution
     evidence.
 
@@ -115,7 +136,10 @@ def pooled_photometric_cost_volume(reference: torch.Tensor, source: torch.Tensor
             else:
                 shifted = F.pad(source[..., offset:], (0, offset))
                 inside = F.pad(torch.ones_like(source[:, :1, :, offset:]), (0, offset))
-            residual = torch.abs(reference - shifted).mean(dim=1, keepdim=True)
+            # Aggregate over a window BEFORE pooling: the window is what makes
+            # the cost discriminative, and pooling alone gives only a 4x4
+            # non-overlapping support, which is not enough.
+            residual = box_filter(torch.abs(reference - shifted).mean(dim=1, keepdim=True), window)
             accumulated = residual if accumulated is None else accumulated + residual
             accumulated_valid = inside if accumulated_valid is None else accumulated_valid + inside
         costs.append(F.avg_pool2d(accumulated / scale, scale)[:, 0])
@@ -174,10 +198,12 @@ class CostVolumeLoss(nn.Module):
             information, so imitating it would inject noise.
     """
 
-    def __init__(self, temperature: float = 0.08, min_confidence: float = 0.05):
+    def __init__(self, temperature: float = 0.08, min_confidence: float = 0.05,
+                 window: int = MATCH_WINDOW):
         super().__init__()
         self.temperature = temperature
         self.min_confidence = min_confidence
+        self.window = window
 
     def forward(self, cost: torch.Tensor, reference: torch.Tensor, source: torch.Tensor,
                 direction: str = "left") -> Dict[str, torch.Tensor]:
@@ -198,10 +224,10 @@ class CostVolumeLoss(nn.Module):
                 reference, source = _fit_to_pooled_size(reference, source,
                                                         cost.shape[-2:], scale)
                 photometric, valid = pooled_photometric_cost_volume(
-                    reference, source, num_disparities, scale, direction)
+                    reference, source, num_disparities, scale, direction, self.window)
             else:
-                photometric, valid = photometric_cost_volume(reference, source,
-                                                             num_disparities, direction)
+                photometric, valid = photometric_cost_volume(
+                    reference, source, num_disparities, direction, self.window)
             # Standardise per pixel so the temperature is scale-free: subtract the
             # best candidate's cost and divide by the spread across candidates.
             # Invalid candidates are pushed far up so they cannot win.
@@ -229,6 +255,12 @@ class CostVolumeLoss(nn.Module):
             candidates = valid.sum(dim=1, keepdim=True).clamp(min=2.0)
             confidence = 1.0 - entropy / torch.log(candidates)
             weight = (confidence > self.min_confidence).to(cost.dtype)
+
+            # Pixels near the left border cannot be evaluated at every disparity,
+            # so their target is computed over a truncated candidate set and is
+            # biased low regardless of the evidence. Supervising them teaches the
+            # cost volume a ramp. Require the full search to have been available.
+            weight = weight * (candidates >= num_disparities).to(cost.dtype)
 
         log_probability = F.log_softmax(-cost, dim=1)
         per_pixel = -(target * log_probability).sum(dim=1, keepdim=True)

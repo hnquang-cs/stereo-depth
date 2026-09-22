@@ -120,6 +120,30 @@ class DisparityRefinement(nn.Module):
         self.out = nn.Conv2d(OFFSET_CHANNELS, 1, kernel_size=3, padding=1)
         self.relu = nn.ReLU(inplace=True)
 
+    def zero_init_residual(self) -> None:
+        """Start the refinement as an exact identity on the coarse disparity.
+
+        ``self.out`` takes ``base_disparity`` itself as one of its input channels
+        and its result is added back to ``base_disparity``, so under a generic
+        (Kaiming) init the head computes ``(1 + w) * base_disparity`` for a
+        random ``w``: measured over five seeds, the refined output came out
+        between 0.73x and 1.34x the coarse disparity *before any training*.
+
+        The reference implementation tolerates this because it trains the
+        refined output against ground-truth disparity, which pins the scale down
+        immediately. Label-free, the only full-resolution signal is the
+        photometric residual -- too weak and too non-convex to undo a global
+        rescaling, so the error persists (measured: refined MAE 71.5 px against
+        a coarse MAE of 17.4 px after 200 steps).
+
+        Zeroing this one layer makes the initial residual exactly zero, so
+        training starts from ``refined == coarse`` and the head can only earn
+        its way away from that. Parameter count and architecture are unchanged.
+        """
+        nn.init.zeros_(self.out.weight)
+        if self.out.bias is not None:
+            nn.init.zeros_(self.out.bias)
+
     def forward(self, image: torch.Tensor, disparity: torch.Tensor, match: torch.Tensor) -> torch.Tensor:
         """Args:
             image: ``(B, 3, H, W)`` reference image (the view the disparity belongs to).

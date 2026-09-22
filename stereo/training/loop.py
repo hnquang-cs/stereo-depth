@@ -464,6 +464,12 @@ class Trainer:
         parts.append(f"warp {logs['valid_warp_ratio']:.3f}")
         if "refine_delta" in logs:
             parts.append(f"cv {logs['cost_volume_mean']:.1f} refine{logs['refine_delta']:+.1f}")
+        if "cost_volume_loss" in logs:
+            # The cost volume is the only part doing real stereo matching, so its
+            # loss and how much of the frame it supervises are the numbers that
+            # say whether matching is happening at all.
+            parts.append(f"cvloss {logs['cost_volume_loss']:.3f} "
+                         f"(sup {logs['cost_supervised_ratio']:.2f})")
         parts.append(f"lr {self.scheduler.get_last_lr()[0]:.2e}")
         print("  " + "  ".join(parts))
 

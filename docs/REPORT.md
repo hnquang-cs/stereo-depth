@@ -493,6 +493,187 @@ hurts on what could be measured. Left-right consistency remains implemented and
 is still used as a *signal* for occlusion detection and pseudo-label filtering,
 neither of which depends on the loss weight.
 
+## 16c. Measured: the matching cost needs a spatial window
+
+Found by downloading a real Middlebury pair and matching it directly, after
+every synthetic test had passed. It is the single largest error in the project
+so far, and synthetic data hid it: the shifted-noise fixtures used throughout
+the test suite are *blurred* noise, which has strong local structure, so a
+per-pixel comparison happens to work on them. Real photographs have flat,
+repetitive regions where it does not.
+
+`CostVolumeLoss` built its target from a **per-pixel** absolute difference. On
+the real `Motorcycle` pair (true disparity 2.2–18.1 px) that target scored:
+
+| matching window | MAE vs. ground truth |
+|---|---:|
+| 1x1 (what the code did) | **13.28 px** |
+| *constant-prediction baseline* | *4.52 px* |
+| 9x9 | **1.78 px** |
+
+A single pixel's intensity matches equally well at dozens of disparities, so a
+1x1 cost carries almost no information — it was **worse than predicting a
+constant**, i.e. the signal the cost volume was being trained toward was worse
+than no signal. Every classical stereo matcher aggregates over a window;
+`MATCH_WINDOW = 9` is that. See `docs/figures/matching-diagnosis.png`.
+
+### Search range: fewer disparities is better
+
+With the window fixed, a sweep over resolution and search range on the same
+pair, all errors converted to native-resolution pixels so they are comparable
+(constant-prediction baseline: **14.95**):
+
+| train size | `num_disparities` | bins spanned by true disparity | MAE (native px) |
+|---|---:|---:|---:|
+| 224x224 | 96 | 4.0 | 14.31 |
+| 224x224 | 48 | 4.0 | 10.95 |
+| 448x448 | 96 | 7.9 | 8.71 |
+| 448x448 | 192 | 7.9 | 11.86 |
+| 640x384 | 320 | 11.4 | 10.83 |
+| 640x384 | 96 | 11.4 | 6.97 |
+| **640x384** | **64** | 11.4 | **6.23** |
+
+Two things follow, both contrary to what was assumed before measuring:
+
+1. **Small inputs are worse, not better.** A cost-volume bin is always
+   `downsample` (4) full-resolution pixels wide, so at 224 px width the entire
+   true disparity range spans only 4 bins — barely distinguishable from a
+   constant. Training at 224x224 to "simplify" makes the matching problem
+   harder, not easier.
+2. **An oversized search range costs accuracy.** At a fixed 640x384, cutting
+   `num_disparities` from 320 to 64 nearly halves the error (10.83 -> 6.23),
+   because every extra candidate is another chance at a spurious match. The
+   `min(width // 2, 384)` policy is a safe *upper bound*, not a good default:
+   it should be set from the disparity actually present in the data.
+
+## 16d. Measured: the refinement head must start as an identity
+
+`DisparityRefinement.out` takes `base_disparity` as one of its input channels
+and its result is added back to `base_disparity`. Under the generic Kaiming init
+the head therefore computes `(1 + w) * base_disparity` for a random `w` — a
+global rescaling of the disparity, present before any training. Measured over
+five seeds on a constant input, the refined output came out at **0.73x to 1.34x**
+the coarse disparity at step 0.
+
+The reference implementation carries the identical structure
+(`hdrn_alpha_stereo.py:283-285`) and is unharmed by it because it trains the
+refined output against ground-truth disparity, which pins the scale down at once.
+Label-free, the only full-resolution signal is the photometric residual, which is
+too weak and too non-convex to undo a global rescaling. On the real pair it did
+not undo it:
+
+| | step 0 | step 200 |
+|---|---:|---:|
+| coarse MAE | 37.33 | 17.36 |
+| refined MAE *(before fix)* | **159.92** | **71.50** |
+
+The refinement was multiplying the error by ~4x and the coarse improvement was
+not reaching the output. `zero_init_residual()` zeroes that one layer after the
+generic init, so the initial residual is exactly zero and training starts from
+`refined == coarse`. Architecture and parameter count are unchanged
+(5,661,646, still an exact match with `mmstereo`). Verified by
+`test_refinement_starts_as_an_exact_identity` (bitwise equality across three
+seeds) and `test_refinement_can_still_learn_a_nonzero_residual` (the zeroed
+layer still receives gradient).
+
+## 16e. Resolution robustness: why the search range must be a constant
+
+`num_disparities` is a *construction-time* parameter -- the aggregation stack
+flattens the disparity axis into channels -- so the `min(width // 2, 384)`
+policy makes the **architecture itself** depend on the training width:
+
+| train width | `num_disparities` | parameters |
+|---:|---:|---:|
+| 224 | 112 | 4,163,434 |
+| 448 | 224 | 5,227,462 |
+| 640 | 320 | 6,703,582 |
+| 960+ | 384 | 7,976,942 |
+
+A checkpoint trained at 640 **refuses to load** at 224:
+`size mismatch for aggregation.conv2d.0.conv1.weight: [320,320,3,3] vs
+[112,112,3,3]`. So "dynamic disparity" in practice means *a different,
+incompatible model per resolution*, which is the opposite of one model that
+runs on any input. Pinned by
+`test_width_derived_range_produces_incompatible_checkpoints`.
+
+### The invariant is `d / width`
+
+Disparity is purely horizontal and scales **linearly** with horizontal resize,
+so `d / width` is invariant under resizing while `d` is not. The architecture is
+therefore specified as a search *fraction* at a declared `canonical_width`, and
+any other resolution is handled by resizing to that width and scaling the answer
+back (`stereo.model.predict_disparity`). Height never enters the disparity, so
+it is left free; the rest of the network is fully convolutional.
+
+Verified end to end: one model with `num_disparities=96, canonical_width=640`
+runs at 640x384, 1242x375, 224x224, 960x540, 993x437 and 1920x1080 -- aspect
+ratios 1.00 to 3.31 -- each returning output at the input's own resolution. The
+value rescaling is exact: a stub predicting a constant 40 px at width 640
+returns 20.00 / 40.00 / 80.00 / 77.62 px at widths 320 / 640 / 1280 / 1242.
+
+**Aspect distortion is geometrically harmless.** Resizing 1242x375 to 640x384
+scales disparity by 640/1242 only; the vertical factor does not enter. The
+existing `BatchGeometricAugment` (scale 0.8-1.2, aspect 0.9-1.1) is what buys
+robustness to the appearance change.
+
+`compute_num_disparities` and `StereoNetConfig.for_width` are retained -- the
+original specification requires the `min(width // 2, 384)` rule to exist in one
+place, and it is still the right *upper bound* -- but they are no longer the
+default path, because the measurement in 16c shows the rule picks close to the
+worst usable value.
+
+## 16f. Measured: the soft-argmin must be restricted to the cost peak
+
+A real cost curve is multi-modal: repeated texture and textureless regions
+produce several near-equal minima. An expectation taken over the whole curve
+lands *between* the modes, on a disparity no mode supports. On the real
+Middlebury pair, same cost volume, 24 bins, errors in native pixels:
+
+| estimator | MAE |
+|---|---:|
+| hard argmin (not differentiable) | 6.97 |
+| full expectation, T=0.02 | 9.14 |
+| full expectation, T=0.10 | 14.45 |
+| full expectation, T=0.50 | 17.67 |
+| **peak-restricted +/-2 bins, T=0.10** | **6.84** |
+
+The full expectation is worse than a hard argmin at **every** temperature tried,
+and degrades monotonically as the distribution is smoothed. Restricting the
+expectation to a window around the peak is still differentiable, and still
+recovers sub-bin precision, so it beats hard argmin rather than merely matching
+it. `soft_argmin_window` defaults to 2; `None` restores the reference
+implementation's behaviour exactly, which
+`test_full_expectation_is_still_available` pins.
+
+**Limits of this evidence.** These numbers are from the *photometric* cost
+volume -- the target the learned volume is trained toward -- not from a trained
+network's own volume, which may be more unimodal. Treat the ranking as
+indicative of the estimator's robustness, not as a predicted end-to-end gain.
+The property it protects against matters most early in training, when the
+learned volume is close to random and therefore maximally multi-modal.
+
+## 16g. Label-free calibration of the search range
+
+Because the range must be fixed before training and both errors are costly
+(16c), it is measured from the training images rather than guessed.
+`calibrate_disparity_range` block-matches the two views against each other,
+discards ambiguous pixels with a ratio test (best cost must beat the best cost
+outside the peak by a factor of 0.8), and takes a high percentile of what
+survives. It reads `left` and `right` only.
+
+Validated against ground truth it never saw, on the real Middlebury pair:
+
+| | estimate | truth |
+|---|---:|---:|
+| p99 disparity at 640px width | **48.0 px** | 50.0 px |
+| recommended `num_disparities` | **56** | true max 51.7 |
+| ground-truth pixels covered | **100.00%** | -- |
+
+For comparison, the `min(width // 2, 384)` rule recommends 320 for the same
+data. `test_calibration_reads_only_the_two_views` pins the label-free property
+by checking that a sample carrying a ground-truth key produces an identical
+answer.
+
 ## 17. Limitations
 
 1. **No benchmark numbers.** Nothing about accuracy is claimed. Every component is tested;

@@ -126,3 +126,42 @@ def test_num_disparities_is_baked_into_the_weights():
     assert narrow.num_disparities == 112 and wide.num_disparities == 384
     with pytest.raises(RuntimeError):
         wide.load_state_dict(narrow.state_dict())
+
+
+def test_refinement_starts_as_an_exact_identity():
+    """The refinement head must add exactly nothing before it is trained.
+
+    ``DisparityRefinement.out`` takes the base disparity as an input channel and
+    its output is added back to that same base, so a generic Kaiming init makes
+    the head compute ``(1 + w) * base`` for a random ``w`` -- a global rescaling
+    of the disparity, present at step 0. The reference implementation gets away
+    with it because a supervised disparity loss corrects the scale immediately;
+    label-free training has no signal strong enough to, so the error survives.
+    """
+    import torch.nn.functional as F
+    from stereo.model import StereoNet, StereoNetConfig
+
+    for seed in range(3):
+        torch.manual_seed(seed)
+        net = StereoNet(StereoNetConfig.for_width(224)).eval()
+        with torch.no_grad():
+            outputs = net(torch.rand(1, 3, 224, 224), torch.rand(1, 3, 224, 224))["left"]
+        coarse = F.interpolate(outputs["disparity_small"] * 4, size=(224, 224),
+                               mode="bilinear", align_corners=False)
+        assert torch.equal(outputs["disparity"], coarse), (
+            f"seed {seed}: refinement is not an identity at init "
+            f"(ratio {float(outputs['disparity'].mean() / coarse.mean()):.3f}x)")
+
+
+def test_refinement_can_still_learn_a_nonzero_residual():
+    """Zero-init must not make the head permanently dead: gradients must flow."""
+    from stereo.model.refinement import DisparityRefinement
+
+    torch.manual_seed(0)
+    head = DisparityRefinement(in_scale=4)
+    head.zero_init_residual()
+    out = head(torch.rand(1, 3, 64, 64), torch.full((1, 1, 16, 16), 5.0),
+               torch.full((1, 1, 16, 16), -0.5))
+    out.sum().backward()
+    assert head.out.weight.grad is not None
+    assert head.out.weight.grad.abs().sum() > 0, "the zeroed layer gets no gradient"
