@@ -75,6 +75,39 @@ class LossWeights:
     #: ground-truth loss; label-free training has no such anchor.
     range_penalty: float = 0.1
 
+    @classmethod
+    def monodepth(cls) -> "LossWeights":
+        """The Monodepth objective: photometric + left-right + smoothness only.
+
+        Godard et al. 2017, "Unsupervised Monocular Depth Estimation with
+        Left-Right Consistency", eq. 2:
+
+            C_s = a_ap (C_ap^l + C_ap^r) + a_ds (C_ds^l + C_ds^r)
+                                         + a_lr (C_lr^l + C_lr^r)
+
+        with ``a_ap = 1``, ``a_lr = 1``, ``a_ds = 0.1``, and the appearance term
+        itself 0.85 SSIM + 0.15 L1 -- which is already
+        :class:`~stereo.losses.PhotometricLoss`'s default.
+
+        ``a_lr = 1`` is only meaningful because Monodepth's disparity is a
+        *fraction of image width*, not a pixel count. This package's
+        disparity-space terms are normalised by the search range for exactly that
+        reason, so 1.0 here means what it means in the paper.
+
+        Everything not in the paper is switched off: the cost-volume term, the
+        teacher, the confidence target, the low-resolution copy and the range
+        penalty.
+
+        **Note.** Monodepth sums this over four output scales. The closest
+        analogue here is ``low_resolution``, which applies the photometric and
+        smoothness terms at cost-volume scale; it is 0.0 in this preset because
+        the paper's objective as usually quoted has three terms. Set it to 1.0
+        for a closer match to the paper's multi-scale behaviour.
+        """
+        return cls(photometric=1.0, left_right=1.0, smoothness=0.1,
+                   low_resolution=0.0, pseudo=0.0, confidence=0.0,
+                   cost_volume=0.0, range_penalty=0.0)
+
 
 @dataclass
 class TeacherConfig:
