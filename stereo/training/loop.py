@@ -477,12 +477,29 @@ class Trainer:
         print("  " + "  ".join(parts))
 
     def _print_epoch(self, epoch: int, train_logs, val_logs) -> None:
-        line = (f"epoch {epoch:3d}  train_loss {train_logs['total']:.4f}  "
-                f"photo {train_logs['photometric']:.4f}  lr_cons {train_logs['left_right']:.4f}  "
-                f"pseudo_cov {train_logs['pseudo_valid_ratio']:.3f}  "
-                f"{train_logs['seconds']:.0f}s")
+        # cvloss is shown because it is the term that does the actual stereo
+        # matching and it dominates the total: cross-entropy over D candidates
+        # starts near log(D), so at 32 bins the run begins around 3.47 and most
+        # of train_loss is this one number. Watching `total` alone mostly watches
+        # the cost volume, and `photo` alone misses it entirely.
+        # left_right is shown as a diagnostic only -- its weight is 0.0 by
+        # default (docs/REPORT.md 16b), so it does not enter the objective.
+        parts = [f"epoch {epoch:3d}",
+                 f"train_loss {train_logs['total']:.4f}",
+                 f"photo {train_logs['photometric']:.4f}"]
+        if "cost_volume_loss" in train_logs:
+            bins = max(self.model.num_disparities // self.model.scale, 2)
+            parts.append(f"cvloss {train_logs['cost_volume_loss']:.4f}"
+                         f"/{math.log(bins):.2f}@init")
+            parts.append(f"sup {train_logs.get('cost_supervised_ratio', 0.0):.2f}")
+        parts.append(f"lr_cons {train_logs['left_right']:.4f}(w=0)")
+        parts.append(f"pseudo_cov {train_logs['pseudo_valid_ratio']:.3f}")
+        parts.append(f"{train_logs['seconds']:.0f}s")
+        line = "  ".join(parts)
         if val_logs:
             line += f"  | val photo {val_logs.get('val/photometric', float('nan')):.4f}"
+            if "val/cost_volume_loss" in val_logs:
+                line += f" cvloss {val_logs['val/cost_volume_loss']:.4f}"
         print(line)
 
     def _check_collapse(self, averages: Dict[str, float], pseudo_scale: float) -> None:
