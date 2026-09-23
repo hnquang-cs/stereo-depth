@@ -5,11 +5,15 @@ for Robotic Manipulation in Homes"** (Shankar, Tjersland, Ma, Stone, Bajracharya
 [arXiv:2109.11644](https://arxiv.org/abs/2109.11644)), trained **without any
 ground-truth disparity or depth**.
 
-The architecture is the paper's. The training signal is not: where the original
-regresses onto ground-truth disparity, this trains on stereo photometric
-reconstruction, left–right consistency, edge-aware smoothness, and EMA
-teacher–student pseudo-labels. Ground truth appears in exactly one place — measuring
-the finished model.
+The architecture is the paper's. The training signal is Monodepth's
+([Godard et al. 2017](https://arxiv.org/abs/1609.03677)): where the original regresses
+onto ground-truth disparity, this trains on stereo photometric reconstruction,
+left–right consistency and edge-aware smoothness. Ground truth appears in exactly one
+place — measuring the finished model.
+
+The paper's NSCE term is **absent, not replaced**: it is anchored on ground-truth
+disparity, so it has no label-free form, and substituting an invented loss for it would
+no longer be a reimplementation of the paper.
 
 The question this repository is built to answer is: **how far can the same stereo
 architecture get without disparity labels, measured honestly against real ground truth?**
@@ -26,18 +30,24 @@ dataset/
 └── right/
 ```
 
-There is no supervised disparity loss, no supervised depth loss, no ground-truth-derived
-pseudo-label, no ground-truth-derived confidence target, and no ground truth reaching the
-EMA teacher. The complete objective is
+There is no supervised disparity loss, no supervised depth loss and no
+ground-truth-derived target of any kind. The complete objective is Monodepth's,
+equation 2:
 
 ```
-L = w_photo  · L_photometric      (SSIM + L1, both directions)
-  + w_lr     · L_left_right
-  + w_smooth · L_smoothness       (edge-aware, on mean-normalised disparity)
-  + w_low    · (the same two terms on the soft-argmin output)
-  + w_pseudo · ramp · L_pseudo    (EMA teacher, filtered)
-  + w_conf   · L_confidence       (label-free matchability target)
+L = 1.0 · L_photometric      (SSIM + L1, both directions)   a_ap
+  + 1.0 · L_left_right                                      a_lr
+  + 0.1 · L_smoothness       (edge-aware, mean-normalised)  a_ds
 ```
+
+`a_lr = 1` is meaningful only because Monodepth's disparity is a *fraction of image
+width*; the disparity-space terms here are normalised by the search range for exactly
+that reason.
+
+Two optional terms are implemented but default to `0.0`, and are not part of Monodepth:
+`low_resolution` (the same terms repeated on the soft-argmin output, the closest
+analogue of Monodepth's four-scale sum) and `confidence` (a label-free matchability
+target).
 
 This is enforced, not just asserted:
 
@@ -46,8 +56,8 @@ This is enforced, not just asserted:
 * `assert_label_free()` runs on **every training batch** and raises if any
   ground-truth key is present.
 * `tests/test_label_isolation.py` corrupts the ground-truth files on disk and asserts
-  that the training loss, the gradient norm, the teacher output and the pseudo-label
-  mask are all bit-identical — while separately asserting the benchmark path *does*
+  that the training loss, the gradient norm, the predicted disparity and every logged
+  quantity are all bit-identical — while separately asserting the benchmark path *does*
   see the change, so the test cannot pass vacuously.
 * `scripts/audit_label_leakage.py` statically audits the repository (see
   [Label Leakage Audit](#label-leakage-audit)).
@@ -101,10 +111,10 @@ stereo-depth/
 │   ├── postprocess.py          matchability post-processing (kept out of the network)
 │   ├── model/                  blocks, feature_extractor, cost_volume, aggregation,
 │   │                           refinement, stereo_net
-│   ├── losses/                 photometric, smoothness, consistency, pseudo_label, confidence
+│   ├── losses/                 photometric, smoothness, consistency, confidence
 │   ├── data/                   base (mode + guard), stereo_folder, sceneflow, kitti,
 │   │                           middlebury, eth3d, augmentation, io, registry, download
-│   ├── training/               teacher (EMA), objective, loop
+│   ├── training/               objective, loop
 │   ├── evaluation/             disparity_metrics, depth_metrics, confidence_metrics,
 │   │                           protocols, benchmark          ← the only GT consumers
 │   └── utils/                  checkpoint, seed, calibration, visualization
@@ -214,33 +224,23 @@ and `build_model_from_checkpoint()` reconstructs the exact architecture.
 
 | Stage | What | Config |
 |---|---|---|
-| 1 | Self-supervised bootstrap from random init (no pretrained weights of any kind) | `train_unlabeled.yaml`, epochs < `teacher.start_epoch` |
-| 2 | EMA teacher/student pseudo-label self-training, ramped in | same config, epochs ≥ `teacher.start_epoch` |
-| 3 | Adaptation to your unlabeled camera, smaller learning rate | `adapt_unlabeled.yaml` |
-| 4 | Frozen ground-truth benchmark | `evaluate.py` |
+| 1 | Self-supervised training from random init (no pretrained weights of any kind) | `train_unlabeled.yaml` |
+| 2 | Adaptation to your unlabeled camera, smaller learning rate | `adapt_unlabeled.yaml` |
+| 3 | Frozen ground-truth benchmark | `evaluate.py` |
 
-Stages 1–3 use no ground truth. Stage 4 may, because no optimisation happens.
+Stages 1–2 use no ground truth. Stage 3 may, because no optimisation happens.
 
-### Teacher/student
+The paper's own Stage 2 — EMA teacher/student pseudo-label self-training — is **not
+implemented**. It is not part of the Monodepth objective this uses, and it was removed
+rather than left as dead configuration.
 
-`θ_teacher ← m·θ_teacher + (1−m)·θ_student`, built with `requires_grad_(False)`, updated
-under `no_grad`, run under `no_grad`. BatchNorm buffers are averaged too. A teacher pixel
-is used as a pseudo-label only if it passes **all** of: confidence ≥ threshold,
-left–right agreement < 1 px, photometric residual < threshold, valid warp, and disparity
-inside the search range. `pseudo_valid_ratio` is logged every epoch and a warning fires
-when it leaves `[0.05, 0.98]`.
-
-Two design points that matter:
+One design point that matters:
 
 * **The photometric loss is not masked by the occlusion mask.** It is a masked mean, so
   a model that made its two disparity maps disagree everywhere could drive that mask —
   and the loss — to zero. Following Monodepth, occlusions are handled by the left–right
   consistency term, and the photometric term is masked only by things the network cannot
   manipulate: the valid-warp region and the image border.
-* **Pseudo-label masks come only from the teacher**, computed under `no_grad`. The same
-  escape route would otherwise exist for the pseudo-label term; the student cannot shrink
-  an EMA-derived mask within a step.
-
 ### Matchability without ground truth
 
 Matchability is parameter-free — the negative entropy of `softmin(cost)` — so it is
@@ -269,10 +269,10 @@ mean confidence and warns above 0.99.
   rather than silently retained.
 * **Colour jitter is applied with identical parameters to both views** — independent
   jitter breaks the brightness constancy the photometric loss rests on. The un-jittered
-  pair is kept as `left_clean`/`right_clean`: the **student** sees the jittered pair, the
-  **teacher** sees the clean one (weak augmentation), and the photometric loss always
-  reconstructs the clean images. Both share the same geometry, so no disparity rescaling
-  is needed between teacher and student.
+  pair is kept as `left_clean`/`right_clean`: the network sees the jittered pair while
+  the photometric loss always reconstructs the clean images, so the jitter cannot be
+  "solved" by the reconstruction. Both share the same geometry, so no disparity
+  rescaling is needed.
 
 ## Evaluation protocols
 
@@ -333,7 +333,7 @@ Covers: disparity sign conventions (including an assertion that the *wrong* warp
 direction fails), sub-pixel warping, left–right consistency on a slanted surface,
 disparity rescaling under resize, the dynamic-disparity rule and its alignment, padding
 round-trips, forward passes at seven resolutions, the mirror-trick identity, soft-argmin
-and matchability limits, every loss, teacher EMA and gradient isolation, metrics against
+and matchability limits, every loss, gradient isolation, metrics against
 hand-computed values, weighted multi-dataset sampling, post-processing gates, an
 end-to-end Trainer epoch, a full train → freeze → evaluate run on synthetic data with
 analytically known ground truth, the Middlebury nonocc/all protocol on synthetic scenes,

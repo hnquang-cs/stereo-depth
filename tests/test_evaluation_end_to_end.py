@@ -96,7 +96,7 @@ def test_full_pipeline_train_freeze_evaluate(synthetic_benchmark, tmp_path):
     chain runs, that the numbers are finite, and that the output files are
     written in the documented format.
     """
-    from stereo.config import LossWeights, TeacherConfig
+    from stereo.config import LossWeights
     from stereo.training import LabelFreeObjective, ObjectiveState
     from stereo.utils.checkpoint import build_model_from_checkpoint, save_checkpoint
     from stereo.data import StereoFolderDataset
@@ -109,12 +109,12 @@ def test_full_pipeline_train_freeze_evaluate(synthetic_benchmark, tmp_path):
 
     model = StereoNet(StereoNetConfig.for_width(96, downsample=4, backbone_width=4,
                                                 feature_channels=4))
-    objective = LabelFreeObjective(LossWeights(pseudo=0.0), TeacherConfig(enabled=False))
+    objective = LabelFreeObjective(LossWeights())
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     images = {"left": batch["left"], "right": batch["right"]}
     for _ in range(5):
         outputs = model(batch["left"], batch["right"], directions=("left", "right"))
-        loss = objective(outputs, images, ObjectiveState(warmup_scale=1.0), None,
+        loss = objective(outputs, images, ObjectiveState(warmup_scale=1.0),
                          max_disparity=model.max_disparity)["loss"]
         optimizer.zero_grad()
         loss.backward()

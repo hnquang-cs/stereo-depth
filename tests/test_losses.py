@@ -4,9 +4,7 @@ import numpy as np
 import pytest
 import torch
 
-from stereo.losses import (ConfidenceLoss, LeftRightConsistencyLoss, PhotometricLoss,
-                           PseudoLabelFilterConfig, PseudoLabelLoss, SmoothnessLoss,
-                           build_pseudo_label_mask, occlusion_mask, ssim)
+from stereo.losses import (ConfidenceLoss, LeftRightConsistencyLoss, PhotometricLoss, SmoothnessLoss, occlusion_mask, ssim)
 from tests.helpers import make_shifted_pair
 
 
@@ -84,41 +82,6 @@ def test_occlusion_mask_flags_disagreement():
     assert float(disagree.mean()) == pytest.approx(0.0)
 
 
-def test_pseudo_label_loss_is_masked_and_detached():
-    student = torch.rand(1, 1, 8, 8, requires_grad=True)
-    teacher = torch.rand(1, 1, 8, 8, requires_grad=True)
-    mask = torch.zeros(1, 1, 8, 8)
-    mask[..., :4, :] = 1.0
-
-    terms = PseudoLabelLoss()(student, teacher, mask)
-    terms["loss"].backward()
-
-    assert student.grad is not None and student.grad.abs().sum() > 0
-    assert teacher.grad is None, "the teacher target must be detached"
-    assert student.grad[..., 4:, :].abs().sum() == 0, "masked-out pixels must get no gradient"
-    assert float(terms["valid_ratio"]) == pytest.approx(0.5)
-
-
-def test_pseudo_label_filter_rejects_each_unreliable_signal():
-    config = PseudoLabelFilterConfig(confidence_threshold=0.5, lr_threshold=1.0,
-                                     photometric_threshold=0.15)
-    shape = (1, 1, 4, 4)
-    good = dict(disparity_teacher=torch.full(shape, 10.0), config=config, max_disparity=100.0,
-                confidence=torch.full(shape, 0.9), lr_error=torch.zeros(shape),
-                photometric_residual=torch.zeros(shape), valid_warp=torch.ones(shape))
-    assert float(build_pseudo_label_mask(**good).mean()) == 1.0
-
-    for key, value in [("confidence", torch.full(shape, 0.1)),
-                       ("lr_error", torch.full(shape, 5.0)),
-                       ("photometric_residual", torch.full(shape, 0.9)),
-                       ("valid_warp", torch.zeros(shape))]:
-        bad = dict(good, **{key: value})
-        assert float(build_pseudo_label_mask(**bad).mean()) == 0.0, f"{key} was not enforced"
-
-    out_of_range = dict(good, disparity_teacher=torch.full(shape, 500.0))
-    assert float(build_pseudo_label_mask(**out_of_range).mean()) == 0.0
-
-
 def test_confidence_loss_prefers_matching_the_reliability_target():
     loss_fn = ConfidenceLoss()
     confident = torch.log(torch.full((1, 1, 8, 8), 0.95))
@@ -192,7 +155,7 @@ def test_disparity_space_losses_are_normalised_by_the_search_range():
     range before weighting, or the weights mean different things at different
     resolutions -- and a plausible-looking 0.5 becomes eight times the whole
     photometric signal."""
-    from stereo.config import LossWeights, TeacherConfig
+    from stereo.config import LossWeights
     from stereo.training import LabelFreeObjective, ObjectiveState
 
     torch.manual_seed(0)
@@ -207,11 +170,9 @@ def test_disparity_space_losses_are_normalised_by_the_search_range():
                 "disparity_small": torch.full((1, 1, 8, 32), value / 4),
                 "matchability": torch.full((1, 1, 8, 32), -0.1),
             }
-        objective = LabelFreeObjective(
-            LossWeights(photometric=0.0, smoothness=0.0, low_resolution=0.0,
-                        confidence=0.0, range_penalty=0.0, left_right=1.0),
-            TeacherConfig(enabled=False))
-        result = objective(outputs, images, ObjectiveState(warmup_scale=1.0), None,
+        objective = LabelFreeObjective(LossWeights(photometric=0.0, smoothness=0.0, low_resolution=0.0,
+                        confidence=0.0, range_penalty=0.0, left_right=1.0))
+        result = objective(outputs, images, ObjectiveState(warmup_scale=1.0),
                            max_disparity=max_disparity)
         return float(result["loss"]), result["logs"]["left_right"]
 

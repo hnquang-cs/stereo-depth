@@ -225,7 +225,7 @@ def test_uniform_batches_carry_no_mask():
 
 def test_padded_rows_do_not_contribute_to_the_objective():
     """Replicated padding matches itself perfectly, so it must be excluded."""
-    from stereo.config import LossWeights, TeacherConfig
+    from stereo.config import LossWeights
     from stereo.training import LabelFreeObjective, ObjectiveState
 
     torch.manual_seed(0)
@@ -235,8 +235,8 @@ def test_padded_rows_do_not_contribute_to_the_objective():
 
     mask = torch.ones(1, 1, 128, 256)
     mask[..., 96:, :] = 0.0
-    objective = LabelFreeObjective(LossWeights(), TeacherConfig(enabled=False))
-    common = dict(state=ObjectiveState(warmup_scale=1.0), teacher_outputs=None, max_disparity=100.0)
+    objective = LabelFreeObjective(LossWeights())
+    common = dict(state=ObjectiveState(warmup_scale=1.0), max_disparity=100.0)
     unmasked = objective(outputs, {"left": left, "right": right}, **common)
     masked = objective(outputs, {"left": left, "right": right}, valid_mask=mask, **common)
     assert float(masked["loss"]) != float(unmasked["loss"]), "the mask had no effect"

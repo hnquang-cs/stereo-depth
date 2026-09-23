@@ -1,4 +1,4 @@
-# Stage 1 + Stage 2: label-free self-supervised stereo with EMA teacher/student.
+# Label-free self-supervised stereo: the Monodepth objective on a cost-volume network.
 #
 # NO GROUND-TRUTH DISPARITY OR DEPTH IS READ BY THIS CONFIGURATION.
 # The benchmark datasets below contribute their left/right images only; the
@@ -92,26 +92,9 @@ loss:
   photometric: 1.0
   smoothness: 0.1
   # 0.0 by default: measured to hurt monotonically (see LossWeights).
-  # Still used as a signal for occlusion detection and pseudo-label filtering.
   left_right: 0.0
-  pseudo: 1.0
   confidence: 0.05      # label-free matchability target; set 0.0 to disable
   low_resolution: 0.5   # the same photometric/smoothness terms on the soft-argmin output
-
-teacher:
-  enabled: true
-  start_epoch: 10
-  ema_decay: 0.999
-  ramp_epochs: 10
-  filter:
-    confidence_threshold: 0.5
-    lr_threshold: 1.0
-    photometric_threshold: 0.15
-    use_confidence: true
-    use_lr: true
-    use_photometric: true
-  min_valid_ratio: 0.05
-  max_valid_ratio: 0.98
 
 optimizer:
   name: adam

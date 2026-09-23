@@ -11,7 +11,7 @@ import torch
 from ..model.stereo_net import StereoNet, StereoNetConfig
 
 
-def save_checkpoint(path: str, model: StereoNet, optimizer=None, scheduler=None, teacher=None,
+def save_checkpoint(path: str, model: StereoNet, optimizer=None, scheduler=None,
                     epoch: int = 0, iteration: int = 0, extra: Optional[Dict[str, Any]] = None) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
     payload: Dict[str, Any] = {
@@ -24,8 +24,6 @@ def save_checkpoint(path: str, model: StereoNet, optimizer=None, scheduler=None,
         payload["optimizer"] = optimizer.state_dict()
     if scheduler is not None:
         payload["scheduler"] = scheduler.state_dict()
-    if teacher is not None:
-        payload["teacher"] = teacher.state_dict()
     if extra:
         payload["extra"] = extra
     torch.save(payload, path)

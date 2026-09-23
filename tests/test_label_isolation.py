@@ -7,8 +7,8 @@ truth cannot influence training.  They work at three levels.
    keys, and the guard that the training loop calls rejects any batch carrying
    them.
 2. *Behavioural* -- corrupting the ground-truth files on disk changes nothing
-   about the training loss, the gradients, the teacher output or the
-   pseudo-labels for a fixed batch.
+   about the training loss, the gradients, the predicted disparity or any
+   logged quantity for a fixed batch.
 3. *Static* -- no module reachable from the training path imports the
    evaluation package.
 """
@@ -71,10 +71,10 @@ def test_benchmark_datasets_refuse_augmentation(labelled_dataset):
 
 
 def _training_signature(dataset_root, seed=0):
-    """Loss, gradient norm, teacher output and pseudo-mask for one fixed batch."""
-    from stereo.config import LossWeights, TeacherConfig
+    """Loss, gradient norm and every logged quantity, for one fixed batch."""
+    from stereo.config import LossWeights
     from stereo.model import StereoNet, StereoNetConfig
-    from stereo.training import EmaTeacher, LabelFreeObjective, ObjectiveState
+    from stereo.training import LabelFreeObjective, ObjectiveState
 
     torch.manual_seed(seed)
     dataset = StereoFolderDataset(dataset_root, mode=DatasetMode.TRAIN)
@@ -83,25 +83,23 @@ def _training_signature(dataset_root, seed=0):
 
     model = StereoNet(StereoNetConfig.for_width(96, downsample=4, backbone_width=4,
                                                 feature_channels=4))
-    teacher = EmaTeacher(model, 0.999)
-    objective = LabelFreeObjective(LossWeights(), TeacherConfig())
+    # Every optional term on, so the fingerprint covers all of them.
+    objective = LabelFreeObjective(LossWeights(confidence=0.05, low_resolution=0.5,
+                                               range_penalty=0.1))
 
     images = {"left": batch["left_clean"] if "left_clean" in batch else batch["left"],
               "right": batch["right_clean"] if "right_clean" in batch else batch["right"]}
-    teacher_outputs = teacher.predict(images["left"], images["right"])
     outputs = model(batch["left"], batch["right"], directions=("left", "right"))
-    result = objective(outputs, images, ObjectiveState(pseudo_scale=1.0, warmup_scale=1.0),
-                       teacher_outputs, max_disparity=model.max_disparity)
+    result = objective(outputs, images, ObjectiveState(warmup_scale=1.0),
+                       max_disparity=model.max_disparity)
     result["loss"].backward()
 
     gradient = torch.cat([p.grad.flatten() for p in model.parameters() if p.grad is not None])
-    mask = objective._teacher_mask(teacher_outputs["left"], teacher_outputs, images, "left",
-                                   model.max_disparity)
     return {
         "loss": float(result["loss"].detach()),
         "grad_norm": float(gradient.norm()),
-        "teacher_disparity": teacher_outputs["left"]["disparity"].clone(),
-        "pseudo_mask": mask.clone(),
+        "disparity": outputs["left"]["disparity"].detach().clone(),
+        "logs": {k: round(v, 10) for k, v in result["logs"].items()},
     }
 
 
@@ -127,8 +125,8 @@ def test_corrupting_ground_truth_cannot_change_training(labelled_dataset):
 
     assert before["loss"] == pytest.approx(after["loss"], rel=1e-9)
     assert before["grad_norm"] == pytest.approx(after["grad_norm"], rel=1e-9)
-    assert torch.equal(before["teacher_disparity"], after["teacher_disparity"])
-    assert torch.equal(before["pseudo_mask"], after["pseudo_mask"])
+    assert torch.equal(before["disparity"], after["disparity"])
+    assert before["logs"] == after["logs"]
 
 
 def test_deleting_ground_truth_does_not_break_training(labelled_dataset):
@@ -143,9 +141,9 @@ def test_deleting_ground_truth_does_not_break_training(labelled_dataset):
 def test_training_modules_do_not_import_evaluation():
     """Static check: nothing on the training path pulls in the ground-truth code."""
     training_modules = [
-        "stereo.training.loop", "stereo.training.objective", "stereo.training.teacher",
+        "stereo.training.loop", "stereo.training.objective",
         "stereo.losses.photometric", "stereo.losses.smoothness", "stereo.losses.consistency",
-        "stereo.losses.pseudo_label", "stereo.losses.confidence",
+        "stereo.losses.confidence",
         "stereo.model.stereo_net", "stereo.geometry",
     ]
     for name in training_modules:

@@ -14,7 +14,6 @@ import yaml
 
 from .data.augmentation import GeometricAugmentConfig, PhotometricAugmentConfig, ResizeConfig
 from .data.registry import DatasetSpec
-from .losses.pseudo_label import PseudoLabelFilterConfig
 from .model.stereo_net import StereoNetConfig
 from .postprocess import PostProcessConfig
 
@@ -35,12 +34,11 @@ class LossWeights:
     cost volume is therefore trained only by the gradient reaching it back
     through the soft-argmin.
 
-    The remaining weights below are the paper's later stages (teacher
-    self-training, matchability) and auxiliary regularisers. They default to 0.0
-    so that the objective is exactly the three Monodepth terms; turn them on
-    deliberately.
+    The remaining weights below are auxiliary regularisers, not part of
+    Monodepth. They default to 0.0 so the objective is exactly the three
+    Monodepth terms; turn them on deliberately.
 
-    The disparity-space terms (``left_right``, ``pseudo``, ``range_penalty``) are
+    The disparity-space terms (``left_right``, ``range_penalty``) are
     applied to quantities **normalised by the disparity search range**, so these
     weights mean the same thing at any resolution or disparity range. Without
     that normalisation they are pixel-scale numbers being weighed against a
@@ -56,9 +54,6 @@ class LossWeights:
     smoothness: float = 0.1         #: a_ds
 
     # -- not part of it; off unless deliberately enabled -------------------- #
-    #: Teacher pseudo-labels, the paper's Stage 2. Applied to
-    #: (smooth-L1 teacher error / max_disparity).
-    pseudo: float = 0.0
     #: Label-free matchability target. Not from either paper.
     confidence: float = 0.0
     #: The photometric/smoothness terms repeated on the low-resolution
@@ -87,8 +82,8 @@ class LossWeights:
         disparity-space terms are normalised by the search range for exactly that
         reason, so 1.0 here means what it means in the paper.
 
-        Everything not in the paper is switched off: the teacher, the
-        confidence target, the low-resolution copy and the range penalty.
+        Everything not in the paper is switched off: the confidence target,
+        the low-resolution copy and the range penalty.
 
         **This is the whole objective.** The paper's NSCE term is anchored on
         ground-truth disparity and so has no label-free form; it is simply absent
@@ -103,23 +98,9 @@ class LossWeights:
 
         """
         return cls(photometric=1.0, left_right=1.0, smoothness=0.1,
-                   low_resolution=0.0, pseudo=0.0, confidence=0.0,
+                   low_resolution=0.0, confidence=0.0,
                    range_penalty=0.0)
 
-
-@dataclass
-class TeacherConfig:
-    """EMA teacher / student self-training (Stage 2)."""
-    enabled: bool = True
-    #: Epoch at which pseudo-labelling switches on. Before this, Stage 1 only.
-    start_epoch: int = 10
-    ema_decay: float = 0.999
-    #: Epochs over which the pseudo-label weight ramps from 0 to its full value.
-    ramp_epochs: int = 10
-    filter: PseudoLabelFilterConfig = field(default_factory=PseudoLabelFilterConfig)
-    #: Warn when the accepted fraction leaves this band (collapse monitor).
-    min_valid_ratio: float = 0.05
-    max_valid_ratio: float = 0.98
 
 
 @dataclass
@@ -186,7 +167,6 @@ class Config:
     model: StereoNetConfig = field(default_factory=StereoNetConfig)
     data: DataConfig = field(default_factory=DataConfig)
     loss: LossWeights = field(default_factory=LossWeights)
-    teacher: TeacherConfig = field(default_factory=TeacherConfig)
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)

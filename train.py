@@ -31,7 +31,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--device", default=None, help="cuda, cpu or mps")
     parser.add_argument("--set", nargs="*", default=[], metavar="KEY=VALUE",
-                        help="dotted config overrides, e.g. teacher.start_epoch=5")
+                        help="dotted config overrides, e.g. optimizer.learning_rate=1e-4")
     return parser.parse_args()
 
 

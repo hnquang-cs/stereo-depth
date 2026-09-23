@@ -5,10 +5,10 @@ import numpy as np
 import pytest
 import torch
 
-from stereo.config import Config, LossWeights, TeacherConfig
+from stereo.config import Config, LossWeights
 from stereo.data import DatasetMode, StereoFolderDataset, collate_samples
 from stereo.model import StereoNet, StereoNetConfig
-from stereo.training import EmaTeacher, LabelFreeObjective, ObjectiveState, pseudo_label_weight
+from stereo.training import LabelFreeObjective, ObjectiveState
 
 
 def tiny_model(width=96):
@@ -20,97 +20,24 @@ def tiny_model(width=96):
 # EMA teacher
 # --------------------------------------------------------------------------- #
 
-def test_ema_teacher_starts_as_a_copy_and_moves_toward_the_student():
-    student = tiny_model()
-    teacher = EmaTeacher(student, decay=0.9)
-    for a, b in zip(student.parameters(), teacher.model.parameters()):
-        assert torch.equal(a, b)
-
-    with torch.no_grad():
-        for parameter in student.parameters():
-            parameter.add_(1.0)
-    before = [p.clone() for p in teacher.model.parameters()]
-    teacher.update(student)
-
-    for old, new, target in zip(before, teacher.model.parameters(), student.parameters()):
-        expected = 0.9 * old + 0.1 * target
-        assert torch.allclose(new, expected, atol=1e-6)
-
-
-def test_ema_teacher_has_no_gradients():
-    student = tiny_model()
-    teacher = EmaTeacher(student)
-    assert all(not p.requires_grad for p in teacher.model.parameters())
-
-    left, right = torch.rand(1, 3, 32, 96), torch.rand(1, 3, 32, 96)
-    outputs = teacher.predict(left, right)
-    for output in outputs.values():
-        for tensor in output.values():
-            assert not tensor.requires_grad
-            assert tensor.grad_fn is None
-
-
-def test_ema_teacher_averages_batchnorm_buffers():
-    student = tiny_model()
-    teacher = EmaTeacher(student, decay=0.5)
-    buffers = dict(student.named_buffers())
-    name = next(n for n, b in buffers.items() if "running_mean" in n)
-    with torch.no_grad():
-        buffers[name].fill_(4.0)
-        dict(teacher.model.named_buffers())[name].fill_(0.0)
-    teacher.update(student)
-    assert float(dict(teacher.model.named_buffers())[name].mean()) == pytest.approx(2.0)
-
-
-def test_teacher_does_not_receive_gradient_from_the_loss():
-    student = tiny_model()
-    teacher = EmaTeacher(student)
-    objective = LabelFreeObjective(LossWeights(), TeacherConfig())
-
-    left, right = torch.rand(2, 3, 32, 96), torch.rand(2, 3, 32, 96)
-    teacher_outputs = teacher.predict(left, right)
-    student_outputs = student(left, right, directions=("left", "right"))
-    result = objective(student_outputs, {"left": left, "right": right},
-                       ObjectiveState(pseudo_scale=1.0, warmup_scale=1.0),
-                       teacher_outputs, max_disparity=student.max_disparity)
-    result["loss"].backward()
-
-    assert all(p.grad is None for p in teacher.model.parameters()), "the teacher got gradients"
-    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in student.parameters())
-
-
-def test_pseudo_label_ramp():
-    assert pseudo_label_weight(0, start_epoch=10, ramp_epochs=5) == 0.0
-    assert pseudo_label_weight(9, start_epoch=10, ramp_epochs=5) == 0.0
-    assert pseudo_label_weight(10, start_epoch=10, ramp_epochs=5) == pytest.approx(0.2)
-    assert pseudo_label_weight(14, start_epoch=10, ramp_epochs=5) == pytest.approx(1.0)
-    assert pseudo_label_weight(50, start_epoch=10, ramp_epochs=5) == 1.0
-    assert pseudo_label_weight(10, start_epoch=10, ramp_epochs=0) == 1.0
-
-
-# --------------------------------------------------------------------------- #
-# Objective
-# --------------------------------------------------------------------------- #
-
 def test_objective_runs_without_a_teacher_and_logs_the_expected_keys():
     model = tiny_model()
     # Every optional term switched on, so each one's logs are exercised. The
     # DEFAULT objective is the three Monodepth terms only, which is covered by
     # test_the_default_objective_is_monodepth_and_logs_only_its_terms.
     objective = LabelFreeObjective(LossWeights(confidence=0.05, low_resolution=0.5,
-                                               range_penalty=0.1), TeacherConfig())
+                                               range_penalty=0.1))
     left, right = torch.rand(2, 3, 32, 96), torch.rand(2, 3, 32, 96)
     outputs = model(left, right, directions=("left", "right"))
     result = objective(outputs, {"left": left, "right": right},
-                       ObjectiveState(warmup_scale=1.0, pseudo_scale=0.0),
-                       None, max_disparity=model.max_disparity)
+                       ObjectiveState(warmup_scale=1.0),
+                       max_disparity=model.max_disparity)
 
     assert torch.isfinite(result["loss"])
     for key in ("photometric", "photometric_ssim", "photometric_l1", "smoothness", "left_right",
-                "pseudo_valid_ratio", "valid_warp_ratio", "disparity_mean", "disparity_max",
+                "valid_warp_ratio", "disparity_mean", "disparity_max",
                 "mean_confidence", "total"):
         assert key in result["logs"], key
-    assert result["logs"]["pseudo_valid_ratio"] == 0.0
 
 
 def test_objective_requires_no_ground_truth_argument():
@@ -120,7 +47,7 @@ def test_objective_requires_no_ground_truth_argument():
     # valid_mask -- which rows of a ragged, aspect-preserving batch are real
     # image and which are padding. Derived from image SHAPES, never from
     # disparity. Any further parameter must be justified the same way.
-    assert parameters == {"self", "student_outputs", "images", "state", "teacher_outputs",
+    assert parameters == {"self", "student_outputs", "images", "state",
                           "max_disparity", "valid_mask"}
 
 
@@ -151,14 +78,14 @@ def test_training_step_on_an_unlabeled_dataset_reduces_the_loss(unlabeled_datase
 
     batch = collate_samples([dataset[i] for i in range(4)])
     model = tiny_model()
-    objective = LabelFreeObjective(LossWeights(pseudo=0.0), TeacherConfig(enabled=False))
+    objective = LabelFreeObjective(LossWeights())
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
     images = {"left": batch["left"], "right": batch["right"]}
     losses = []
     for _ in range(12):
         outputs = model(batch["left"], batch["right"], directions=("left", "right"))
-        result = objective(outputs, images, ObjectiveState(warmup_scale=1.0), None,
+        result = objective(outputs, images, ObjectiveState(warmup_scale=1.0),
                            max_disparity=model.max_disparity)
         optimizer.zero_grad()
         result["loss"].backward()
@@ -184,7 +111,6 @@ def test_trainer_runs_an_epoch_on_an_unlabeled_folder(unlabeled_dataset, tmp_pat
     config.data.photometric_augmentation = PhotometricAugmentConfig(enabled=True)
     config.data.geometric_augmentation = GeometricAugmentConfig(enabled=True, scale=(0.9, 1.1),
                                                                 aspect=(0.95, 1.05), min_size=32)
-    config.teacher = TeacherConfig(enabled=True, start_epoch=0, ramp_epochs=1)
     config.training.epochs = 2
     config.training.batch_size = 2
     config.training.num_workers = 0
@@ -196,7 +122,6 @@ def test_trainer_runs_an_epoch_on_an_unlabeled_folder(unlabeled_dataset, tmp_pat
     trainer = Trainer(config, device=torch.device("cpu"))
     best = trainer.fit()
 
-    assert trainer.teacher is not None, "the EMA teacher never started"
     assert len(trainer.history) == 2
     assert np.isfinite(trainer.history[-1]["train/total"])
     assert "val/photometric" in trainer.history[-1]
@@ -249,7 +174,6 @@ def test_short_run_actually_leaves_warmup_and_enables_the_losses(unlabeled_datas
     config.training.output_dir = str(tmp_path / "out")
     config.training.warmup_iterations = 500      # far longer than the whole run
     config.optimizer.warmup_iterations = 500
-    config.teacher.enabled = False
 
     trainer = Trainer(config, device=torch.device("cpu"))
     assert trainer.total_iterations < 500, "this test must model a short run"
@@ -270,10 +194,10 @@ def test_short_run_actually_leaves_warmup_and_enables_the_losses(unlabeled_datas
 def test_range_penalty_punishes_disparity_beyond_the_search_range():
     """The refinement head is an unbounded relu(base + residual); nothing in the
     architecture stops it emitting disparities the cost volume cannot support."""
-    from stereo.config import LossWeights, TeacherConfig
+    from stereo.config import LossWeights
     from stereo.training import LabelFreeObjective, ObjectiveState
 
-    objective = LabelFreeObjective(LossWeights(range_penalty=1.0), TeacherConfig(enabled=False))
+    objective = LabelFreeObjective(LossWeights(range_penalty=1.0))
     left, right = torch.rand(1, 3, 32, 96), torch.rand(1, 3, 32, 96)
     images = {"left": left, "right": right}
 
@@ -282,7 +206,7 @@ def test_range_penalty_punishes_disparity_beyond_the_search_range():
                        "disparity_small": torch.full((1, 1, 8, 24), value / 4),
                        "matchability": torch.full((1, 1, 8, 24), -0.1)}
                    for d in ("left", "right")}
-        result = objective(outputs, images, ObjectiveState(warmup_scale=1.0), None,
+        result = objective(outputs, images, ObjectiveState(warmup_scale=1.0),
                            max_disparity=100.0)
         return result["logs"].get("range_penalty", 0.0)
 
@@ -313,7 +237,6 @@ def test_visualisations_are_written_on_the_configured_cadence(unlabeled_dataset,
     config.training.use_amp = False
     config.training.output_dir = str(tmp_path / "out")
     config.training.visualize_every = 2
-    config.teacher.enabled = False
 
     Trainer(config, device=torch.device("cpu")).fit()
 
@@ -342,7 +265,6 @@ def test_visualisation_can_be_disabled(unlabeled_dataset, tmp_path):
     config.training.use_amp = False
     config.training.output_dir = str(tmp_path / "out")
     config.training.visualize_every = 0
-    config.teacher.enabled = False
 
     Trainer(config, device=torch.device("cpu")).fit()
     assert not (tmp_path / "out" / "visualizations").exists()
@@ -358,11 +280,12 @@ def test_monodepth_preset_is_the_whole_objective():
 
     weights = LossWeights.monodepth()
     assert (weights.photometric, weights.left_right, weights.smoothness) == (1.0, 1.0, 0.1)
-    for unused in ("pseudo", "confidence", "range_penalty", "low_resolution"):
+    for unused in ("confidence", "range_penalty", "low_resolution"):
         assert getattr(weights, unused) == 0.0, f"{unused} is not part of the Monodepth objective"
-    assert not hasattr(weights, "cost_volume"), (
-        "the cost-volume loss was removed: it was an invented stand-in for NSCE, "
-        "which is in neither paper")
+    for removed in ("cost_volume", "pseudo"):
+        assert not hasattr(weights, removed), (
+            f"{removed} was removed: the cost-volume loss was an invented stand-in for "
+            "NSCE, and teacher self-training is not part of the Monodepth objective")
 
 
 def test_the_default_objective_is_monodepth_and_logs_only_its_terms():
@@ -372,12 +295,12 @@ def test_the_default_objective_is_monodepth_and_logs_only_its_terms():
     cannot look like it is optimising something it is not.
     """
     model = tiny_model()
-    objective = LabelFreeObjective(LossWeights(), TeacherConfig(enabled=False))
+    objective = LabelFreeObjective(LossWeights())
     left, right = torch.rand(2, 3, 32, 96), torch.rand(2, 3, 32, 96)
     outputs = model(left, right, directions=("left", "right"))
     result = objective(outputs, {"left": left, "right": right},
-                       ObjectiveState(warmup_scale=1.0, pseudo_scale=0.0),
-                       None, max_disparity=model.max_disparity)
+                       ObjectiveState(warmup_scale=1.0),
+                       max_disparity=model.max_disparity)
 
     assert torch.isfinite(result["loss"])
     for key in ("photometric", "smoothness", "left_right", "total"):

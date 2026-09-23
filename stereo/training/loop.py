@@ -6,7 +6,6 @@ every batch, so a dataset that leaked labels would raise on the first iteration.
 Stages
 ------
 Stage 1  photometric + smoothness + left-right consistency, from random init.
-Stage 2  the same, plus EMA-teacher pseudo-labels, after ``teacher.start_epoch``.
 Stage 3  identical code, started from a checkpoint with a smaller learning rate
          (that is the only difference; see ``configs/adapt_unlabeled.yaml``).
 
@@ -32,7 +31,6 @@ from ..model import StereoNet
 from ..utils.checkpoint import save_checkpoint, load_checkpoint
 from ..utils.seed import set_seed
 from .objective import LabelFreeObjective, ObjectiveState
-from .teacher import EmaTeacher, pseudo_label_weight
 
 
 def build_optimizer(model: nn.Module, config) -> torch.optim.Optimizer:
@@ -94,7 +92,7 @@ class Trainer:
             self.model.load_state_dict(payload["model"])
             print(f"initialised from {config.training.init_checkpoint}")
 
-        self.objective = LabelFreeObjective(config.loss, config.teacher)
+        self.objective = LabelFreeObjective(config.loss)
         self.geometric_augment = BatchGeometricAugment(config.data.geometric_augmentation,
                                                        seed=config.training.seed)
 
@@ -113,7 +111,6 @@ class Trainer:
         self.scaler = torch.amp.GradScaler(self.device.type,
                                            enabled=config.training.use_amp and self.device.type == "cuda")
 
-        self.teacher: Optional[EmaTeacher] = None
         self.iteration = 0
         self.start_epoch = 0
         self.best_metric = float("inf")
@@ -169,10 +166,6 @@ class Trainer:
             self.scheduler.load_state_dict(payload["scheduler"])
         self.start_epoch = payload.get("epoch", 0) + 1
         self.iteration = payload.get("iteration", 0)
-        if "teacher" in payload:
-            self.teacher = EmaTeacher(self.model, self.config.teacher.ema_decay)
-            self.teacher.load_state_dict(payload["teacher"])
-            self.teacher.to(self.device)
         print(f"resumed from {path} at epoch {self.start_epoch}")
 
     def _restore_history(self) -> None:
@@ -208,7 +201,7 @@ class Trainer:
         """Move to device, apply the per-batch geometric augmentation, split the views.
 
         Returns ``student_left/right`` (possibly colour-jittered) and
-        ``clean_left/right`` (never jittered).  The teacher sees the clean pair
+        ``clean_left/right`` (never jittered).  The photometric loss reconstructs the clean pair
         -- weak augmentation -- and the student the jittered one; both share the
         *same* geometry, so no disparity rescaling is needed between them.
         """
@@ -236,14 +229,6 @@ class Trainer:
     def train_epoch(self, epoch: int) -> Dict[str, float]:
         self.model.train()
         cfg = self.config
-        teacher_active = cfg.teacher.enabled and epoch >= cfg.teacher.start_epoch
-        if teacher_active and self.teacher is None:
-            print(f"epoch {epoch}: starting EMA teacher (decay={cfg.teacher.ema_decay})")
-            self.teacher = EmaTeacher(self.model, cfg.teacher.ema_decay).to(self.device)
-
-        pseudo_scale = pseudo_label_weight(epoch, cfg.teacher.start_epoch, cfg.teacher.ramp_epochs) \
-            if teacher_active else 0.0
-
         totals: Dict[str, float] = {}
         count = 0
         steps = self._steps_per_epoch()
@@ -257,20 +242,14 @@ class Trainer:
             state = ObjectiveState(
                 iteration=self.iteration,
                 epoch=epoch,
-                warmup_scale=0.0 if self.iteration < self.loss_warmup else 1.0,
-                pseudo_scale=pseudo_scale)
-
-            teacher_outputs = None
-            if self.teacher is not None and pseudo_scale > 0.0:
-                with torch.no_grad():
-                    teacher_outputs = self.teacher.predict(views["clean_left"], views["clean_right"])
+                warmup_scale=0.0 if self.iteration < self.loss_warmup else 1.0)
 
             with torch.amp.autocast(self.device.type, enabled=self.scaler.is_enabled()):
                 student_outputs = self.model(views["student_left"], views["student_right"],
                                              directions=("left", "right"))
                 result = self.objective(student_outputs,
                                         {"left": views["clean_left"], "right": views["clean_right"]},
-                                        state, teacher_outputs, max_disparity=self.model.max_disparity,
+                                        state, max_disparity=self.model.max_disparity,
                                         valid_mask=views.get("valid_mask"))
                 loss = result["loss"]
 
@@ -283,8 +262,6 @@ class Trainer:
             self.scaler.update()
             self.scheduler.step()
 
-            if self.teacher is not None:
-                self.teacher.update(self.model)
 
             self.iteration += 1
             count += 1
@@ -297,7 +274,7 @@ class Trainer:
         averages = {key: value / max(count, 1) for key, value in totals.items()}
         averages["lr"] = self.scheduler.get_last_lr()[0]
         averages["seconds"] = time.time() - started
-        self._check_collapse(averages, pseudo_scale)
+        self._check_collapse(averages)
         return averages
 
     @torch.no_grad()
@@ -311,9 +288,9 @@ class Trainer:
         for batch in self.val_loader:
             views = self._prepare(batch, augment=False)
             outputs = self.model(views["clean_left"], views["clean_right"], directions=("left", "right"))
-            state = ObjectiveState(iteration=self.iteration, epoch=epoch, warmup_scale=1.0, pseudo_scale=0.0)
+            state = ObjectiveState(iteration=self.iteration, epoch=epoch, warmup_scale=1.0)
             result = self.objective(outputs, {"left": views["clean_left"], "right": views["clean_right"]},
-                                    state, None, max_disparity=self.model.max_disparity,
+                                    state, max_disparity=self.model.max_disparity,
                                     valid_mask=views.get("valid_mask"))
             for key, value in result["logs"].items():
                 totals[key] = totals.get(key, 0.0) + value
@@ -339,7 +316,7 @@ class Trainer:
             self._print_epoch(epoch, train_logs, val_logs)
 
             save_checkpoint(last_path, self.model, self.optimizer, self.scheduler,
-                            self.teacher, epoch, self.iteration,
+                            epoch, self.iteration,
                             extra={"history_tail": self.history[-1]})
 
             if cfg.visualize_every and epoch % cfg.visualize_every == 0:
@@ -350,7 +327,7 @@ class Trainer:
             if selection is not None and selection < self.best_metric:
                 self.best_metric = selection
                 save_checkpoint(best_path, self.model, self.optimizer, self.scheduler,
-                                self.teacher, epoch, self.iteration,
+                                epoch, self.iteration,
                                 extra={"selection_metric": cfg.selection_metric,
                                        "selection_value": selection,
                                        "selection_is_label_free": True})
@@ -458,8 +435,6 @@ class Trainer:
                  f"(ssim {logs['photometric_ssim']:.3f} l1 {logs['photometric_l1']:.3f})",
                  f"smooth {logs['smoothness']:.4f}",
                  f"lr_cons {logs['left_right']:.4f}"]
-        if logs.get("pseudo_scale", 0.0) > 0:
-            parts.append(f"pseudo {logs.get('pseudo', 0.0):.4f} (cov {logs['pseudo_valid_ratio']:.3f})")
         if "mean_confidence" in logs:
             parts.append(f"conf {logs['mean_confidence']:.3f}")
         parts.append(f"d[{logs['disparity_min']:.1f},{logs['disparity_max']:.1f}] "
@@ -475,29 +450,22 @@ class Trainer:
                  f"train_loss {train_logs['total']:.4f}",
                  f"photo {train_logs['photometric']:.4f}"]
         parts.append(f"lr_cons {train_logs['left_right']:.4f}(w={self.config.loss.left_right:g})")
-        parts.append(f"pseudo_cov {train_logs['pseudo_valid_ratio']:.3f}")
         parts.append(f"{train_logs['seconds']:.0f}s")
         line = "  ".join(parts)
         if val_logs:
             line += f"  | val photo {val_logs.get('val/photometric', float('nan')):.4f}"
         print(line)
 
-    def _check_collapse(self, averages: Dict[str, float], pseudo_scale: float) -> None:
-        """Warn when self-training looks like it is degenerating."""
-        cfg = self.config.teacher
-        if pseudo_scale > 0.0:
-            ratio = averages.get("pseudo_valid_ratio", 0.0)
-            if ratio < cfg.min_valid_ratio:
-                print(f"  WARNING: pseudo-label coverage {ratio:.3f} < {cfg.min_valid_ratio}: "
-                      "the filter is rejecting almost everything; loosen the thresholds or "
-                      "extend the warm-up.")
-            elif ratio > cfg.max_valid_ratio:
-                print(f"  WARNING: pseudo-label coverage {ratio:.3f} > {cfg.max_valid_ratio}: "
-                      "the filter is accepting almost everything; the teacher's errors are "
-                      "being copied wholesale.")
+    def _check_collapse(self, averages: Dict[str, float]) -> None:
+        """Warn when training looks like it is degenerating."""
         if averages.get("disparity_max", 1.0) < 1e-3:
             print("  WARNING: disparity collapsed to zero. Lower the smoothness weight or "
                   "check that left/right are not swapped.")
         if averages.get("mean_confidence", 0.0) > 0.99:
             print("  WARNING: mean confidence > 0.99; the matchability target may have "
                   "collapsed to 'confident everywhere'. Reduce loss.confidence.")
+        spread = averages.get("disparity_max", 0.0) - averages.get("disparity_min", 0.0)
+        if 0.0 < spread < 1.0:
+            print(f"  WARNING: disparity spread is only {spread:.3f} px -- the prediction is "
+                  "nearly constant. A flat field is exactly left-right consistent, so check "
+                  "that loss.left_right and loss.smoothness are not dominating.")

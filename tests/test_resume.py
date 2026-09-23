@@ -51,7 +51,6 @@ def make_config(dataset, output_dir, epochs):
     config.training.use_amp = False
     config.training.output_dir = output_dir
     config.training.visualize_every = 0
-    config.teacher.enabled = False
     return config
 
 
