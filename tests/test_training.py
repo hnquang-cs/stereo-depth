@@ -94,7 +94,11 @@ def test_pseudo_label_ramp():
 
 def test_objective_runs_without_a_teacher_and_logs_the_expected_keys():
     model = tiny_model()
-    objective = LabelFreeObjective(LossWeights(), TeacherConfig())
+    # Every optional term switched on, so each one's logs are exercised. The
+    # DEFAULT objective is the three Monodepth terms only, which is covered by
+    # test_the_default_objective_is_monodepth_and_logs_only_its_terms.
+    objective = LabelFreeObjective(LossWeights(confidence=0.05, low_resolution=0.5,
+                                               range_penalty=0.1), TeacherConfig())
     left, right = torch.rand(2, 3, 32, 96), torch.rand(2, 3, 32, 96)
     outputs = model(left, right, directions=("left", "right"))
     result = objective(outputs, {"left": left, "right": right},
@@ -113,14 +117,11 @@ def test_objective_requires_no_ground_truth_argument():
     """The objective's signature has nowhere to put a label."""
     import inspect
     parameters = set(inspect.signature(LabelFreeObjective.__call__).parameters)
-    # Two non-label additions, each justified before being allowed here:
-    #   valid_mask  -- which rows of a ragged, aspect-preserving batch are real
-    #                  image and which are padding. Derived from image SHAPES,
-    #                  never from disparity.
-    #   diagnostics -- a bool that turns on logging-only terms. Carries no data.
-    # Any further parameter must be justified the same way.
+    # valid_mask -- which rows of a ragged, aspect-preserving batch are real
+    # image and which are padding. Derived from image SHAPES, never from
+    # disparity. Any further parameter must be justified the same way.
     assert parameters == {"self", "student_outputs", "images", "state", "teacher_outputs",
-                          "max_disparity", "valid_mask", "diagnostics"}
+                          "max_disparity", "valid_mask"}
 
 
 # --------------------------------------------------------------------------- #
@@ -347,36 +348,45 @@ def test_visualisation_can_be_disabled(unlabeled_dataset, tmp_path):
     assert not (tmp_path / "out" / "visualizations").exists()
 
 
-def test_cost_volume_loss_is_logged_even_when_its_weight_is_zero():
-    """The clearest read on whether the cost volume is matching must not vanish
-    exactly when the term is switched off -- which is when it matters most."""
-    import torch
+def test_monodepth_preset_is_the_whole_objective():
+    """Exactly the three Monodepth terms, and nothing else.
 
-    from stereo.config import LossWeights, TeacherConfig
-    from stereo.model import StereoNet, StereoNetConfig
-    from stereo.training import LabelFreeObjective, ObjectiveState
-
-    torch.manual_seed(0)
-    net = StereoNet(StereoNetConfig(num_disparities=32)).eval()
-    left, right = torch.rand(1, 3, 64, 128), torch.rand(1, 3, 64, 128)
-    outputs = net(left, right, directions=("left", "right"))
-    objective = LabelFreeObjective(LossWeights.monodepth(), TeacherConfig(enabled=False))
-    common = dict(state=ObjectiveState(warmup_scale=1.0), teacher_outputs=None, max_disparity=30.0)
-
-    assert objective.weights.cost_volume == 0.0
-    quiet = objective(outputs, {"left": left, "right": right}, **common)
-    assert "cost_volume_loss" not in quiet["logs"], "it must not be paid for by default"
-
-    loud = objective(outputs, {"left": left, "right": right}, diagnostics=True, **common)
-    assert "cost_volume_loss" in loud["logs"]
-    # Logging only: it must not change the objective.
-    assert float(loud["loss"]) == float(quiet["loss"])
-
-
-def test_monodepth_preset_matches_the_paper():
+    The paper's NSCE term is anchored on ground-truth disparity, so it has no
+    label-free form and is absent rather than replaced.
+    """
     from stereo.config import LossWeights
 
     weights = LossWeights.monodepth()
     assert (weights.photometric, weights.left_right, weights.smoothness) == (1.0, 1.0, 0.1)
-    for unused in ("pseudo", "confidence", "cost_volume", "range_penalty", "low_resolution"):
+    for unused in ("pseudo", "confidence", "range_penalty", "low_resolution"):
         assert getattr(weights, unused) == 0.0, f"{unused} is not part of the Monodepth objective"
+    assert not hasattr(weights, "cost_volume"), (
+        "the cost-volume loss was removed: it was an invented stand-in for NSCE, "
+        "which is in neither paper")
+
+
+def test_the_default_objective_is_monodepth_and_logs_only_its_terms():
+    """The default must be exactly photometric + left-right + smoothness.
+
+    Terms that are off must not appear in the logs either, so a training run
+    cannot look like it is optimising something it is not.
+    """
+    model = tiny_model()
+    objective = LabelFreeObjective(LossWeights(), TeacherConfig(enabled=False))
+    left, right = torch.rand(2, 3, 32, 96), torch.rand(2, 3, 32, 96)
+    outputs = model(left, right, directions=("left", "right"))
+    result = objective(outputs, {"left": left, "right": right},
+                       ObjectiveState(warmup_scale=1.0, pseudo_scale=0.0),
+                       None, max_disparity=model.max_disparity)
+
+    assert torch.isfinite(result["loss"])
+    for key in ("photometric", "smoothness", "left_right", "total"):
+        assert key in result["logs"], key
+    for absent in ("mean_confidence", "photometric_small", "range_penalty"):
+        assert absent not in result["logs"], f"{absent} is off but still logged"
+
+    # And the total really is just those three, at their Monodepth weights.
+    weights = LossWeights()
+    expected = (weights.photometric * result["logs"]["photometric"]
+                + weights.smoothness * result["logs"]["smoothness"])
+    assert result["logs"]["total"] > expected, "left_right must contribute too"

@@ -312,15 +312,9 @@ class Trainer:
             views = self._prepare(batch, augment=False)
             outputs = self.model(views["clean_left"], views["clean_right"], directions=("left", "right"))
             state = ObjectiveState(iteration=self.iteration, epoch=epoch, warmup_scale=1.0, pseudo_scale=0.0)
-            # diagnostics=True also evaluates the cost-volume loss when its
-            # weight is 0. It is the clearest read on whether the cost volume is
-            # matching at all, and without this it disappears from the logs
-            # exactly when it is switched off. Affordable here because validation
-            # runs once per epoch and is already no_grad; it costs ~89% of a
-            # forward pass, so it is never done per training step.
             result = self.objective(outputs, {"left": views["clean_left"], "right": views["clean_right"]},
                                     state, None, max_disparity=self.model.max_disparity,
-                                    valid_mask=views.get("valid_mask"), diagnostics=True)
+                                    valid_mask=views.get("valid_mask"))
             for key, value in result["logs"].items():
                 totals[key] = totals.get(key, 0.0) + value
             count += 1
@@ -473,48 +467,19 @@ class Trainer:
         parts.append(f"warp {logs['valid_warp_ratio']:.3f}")
         if "refine_delta" in logs:
             parts.append(f"cv {logs['cost_volume_mean']:.1f} refine{logs['refine_delta']:+.1f}")
-        if "cost_volume_loss" in logs:
-            # The cost volume is the only part doing real stereo matching, so its
-            # loss and how much of the frame it supervises are the numbers that
-            # say whether matching is happening at all.
-            parts.append(f"cvloss {logs['cost_volume_loss']:.3f} "
-                         f"(sup {logs['cost_supervised_ratio']:.2f})")
         parts.append(f"lr {self.scheduler.get_last_lr()[0]:.2e}")
         print("  " + "  ".join(parts))
 
     def _print_epoch(self, epoch: int, train_logs, val_logs) -> None:
-        # cvloss is shown because it is the term that does the actual stereo
-        # matching and it dominates the total: cross-entropy over D candidates
-        # starts near log(D), so at 32 bins the run begins around 3.47 and most
-        # of train_loss is this one number. Watching `total` alone mostly watches
-        # the cost volume, and `photo` alone misses it entirely.
-        # left_right carries its weight in the label: it is logged whatever the
-        # weight is, and at w=0 (the default, docs/REPORT.md 16b) it does not
-        # enter the objective at all.
         parts = [f"epoch {epoch:3d}",
                  f"train_loss {train_logs['total']:.4f}",
                  f"photo {train_logs['photometric']:.4f}"]
-        bins = max(self.model.num_disparities // self.model.scale, 2)
-        reference = math.log(bins)
-        if "cost_volume_loss" in train_logs:
-            parts.append(f"cvloss {train_logs['cost_volume_loss']:.4f}/{reference:.2f}@init")
-            parts.append(f"sup {train_logs.get('cost_supervised_ratio', 0.0):.2f}")
-        elif val_logs and "val/cost_volume_loss" in val_logs:
-            # Weight is 0, so it is measured on validation only. Marked (diag) to
-            # make clear it is being watched, not optimised.
-            parts.append(f"cvloss {val_logs['val/cost_volume_loss']:.4f}"
-                         f"/{reference:.2f}@init(diag)")
-            parts.append(f"sup {val_logs.get('val/cost_supervised_ratio', 0.0):.2f}")
-        # The raw left-right error is in PIXELS and is logged whatever its weight,
-        # so the weight is shown next to it: at w=0 it is a diagnostic, not a term.
         parts.append(f"lr_cons {train_logs['left_right']:.4f}(w={self.config.loss.left_right:g})")
         parts.append(f"pseudo_cov {train_logs['pseudo_valid_ratio']:.3f}")
         parts.append(f"{train_logs['seconds']:.0f}s")
         line = "  ".join(parts)
         if val_logs:
             line += f"  | val photo {val_logs.get('val/photometric', float('nan')):.4f}"
-            if "cost_volume_loss" in train_logs and "val/cost_volume_loss" in val_logs:
-                line += f" cvloss {val_logs['val/cost_volume_loss']:.4f}"
         print(line)
 
     def _check_collapse(self, averages: Dict[str, float], pseudo_scale: float) -> None:

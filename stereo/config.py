@@ -23,57 +23,50 @@ from .postprocess import PostProcessConfig
 class LossWeights:
     """Weights of the label-free objective.  There is no ground-truth term.
 
+    **The default is the Monodepth objective** (Godard et al. 2017, eq. 2):
+    photometric + left-right + smoothness, and nothing else. That is the
+    self-supervised half of what this package is: the paper's cost-volume
+    architecture (arXiv:2109.11644) trained by Monodepth's self-supervised
+    losses.
+
+    The paper's own NSCE term is **absent, not replaced**. NSCE is anchored on
+    ground-truth disparity, so it has no label-free form, and inventing a
+    substitute for it would no longer be a reimplementation of the paper. The
+    cost volume is therefore trained only by the gradient reaching it back
+    through the soft-argmin.
+
+    The remaining weights below are the paper's later stages (teacher
+    self-training, matchability) and auxiliary regularisers. They default to 0.0
+    so that the objective is exactly the three Monodepth terms; turn them on
+    deliberately.
+
     The disparity-space terms (``left_right``, ``pseudo``, ``range_penalty``) are
     applied to quantities **normalised by the disparity search range**, so these
     weights mean the same thing at any resolution or disparity range. Without
     that normalisation they are pixel-scale numbers being weighed against a
     photometric residual in ``[0, 1]``, which is how a left-right weight of 0.5
     ended up eight times stronger than the entire photometric signal and
-    collapsed training to a constant disparity field.
+    collapsed training to a constant disparity field. It is also why Monodepth's
+    ``a_lr = 1`` transfers: its disparity is a fraction of image width.
     """
-    photometric: float = 1.0
-    smoothness: float = 0.1
-    #: Applied to (left-right error / max_disparity).
-    #:
-    #: DEFAULT 0.0, set from measurement rather than from theory. A 4-weight,
-    #: 3-seed sweep on a synthetic pair with known disparity found this term
-    #: monotonically harmful -- correlation with the true disparity fell
-    #: 0.606 -> 0.360 -> 0.273 -> 0.144 for weights 0.0, 0.25, 1.0, 4.0, and the
-    #: photometric loss worsened alongside it. A constant disparity field is
-    #: *exactly* left-right consistent while any real field is not, so the term
-    #: rewards flatness, and nothing measured here offsets that.
-    #:
-    #: Caveat: that sweep is a single image pair with a deliberately small model
-    #: over 400 steps, which has no occlusions and no generalisation pressure --
-    #: precisely the conditions under which this regulariser would be expected to
-    #: earn its keep. It may well help on real multi-image training; there is
-    #: simply no evidence here that it does. Raise it if you can measure a gain.
-    #:
-    #: Left-right consistency is still computed and still used as a *signal* --
-    #: for occlusion detection and pseudo-label filtering -- neither of which
-    #: depends on this weight.
-    left_right: float = 0.0
-    #: Applied to (smooth-L1 teacher error / max_disparity).
-    pseudo: float = 10.0
-    confidence: float = 0.05
-    #: Weight of the extra photometric/smoothness terms on the low-resolution
-    #: (soft-argmin) disparity, which gives the cost volume a direct gradient.
-    low_resolution: float = 0.5
-    #: Cross-entropy from the network's cost volume to a photometric target.
-    #: This is the label-free stand-in for the paper's NSCE loss, which anchors
-    #: the cost volume at the ground-truth disparity. Without something in this
-    #: role the cost volume receives only the indirect "move the mean" gradient
-    #: through soft-argmin, and was measured not to learn at all: the coarse
-    #: disparity sat at the midpoint of its search range while the refinement
-    #: reduced the photometric loss by other means.
-    cost_volume: float = 1.0
-    #: Penalty on disparity predicted beyond the cost volume's search range.
-    #: The refinement head is an unbounded ``relu(base + residual)``, so nothing
-    #: in the architecture stops it emitting values the cost volume cannot
-    #: support -- a randomly initialised model was measured emitting 20778 px
-    #: against a 315 px range. Supervised training pulls those back via the
-    #: ground-truth loss; label-free training has no such anchor.
-    range_penalty: float = 0.1
+
+    # -- the Monodepth objective ------------------------------------------- #
+    photometric: float = 1.0        #: a_ap
+    left_right: float = 1.0         #: a_lr, applied to (left-right error / max_disparity)
+    smoothness: float = 0.1         #: a_ds
+
+    # -- not part of it; off unless deliberately enabled -------------------- #
+    #: Teacher pseudo-labels, the paper's Stage 2. Applied to
+    #: (smooth-L1 teacher error / max_disparity).
+    pseudo: float = 0.0
+    #: Label-free matchability target. Not from either paper.
+    confidence: float = 0.0
+    #: The photometric/smoothness terms repeated on the low-resolution
+    #: (soft-argmin) disparity -- the closest analogue of Monodepth's four-scale
+    #: sum, and the only other route by which the cost volume gets a gradient.
+    low_resolution: float = 0.0
+    #: Keeps predictions inside the search range.
+    range_penalty: float = 0.0
 
     @classmethod
     def monodepth(cls) -> "LossWeights":
@@ -94,19 +87,24 @@ class LossWeights:
         disparity-space terms are normalised by the search range for exactly that
         reason, so 1.0 here means what it means in the paper.
 
-        Everything not in the paper is switched off: the cost-volume term, the
-        teacher, the confidence target, the low-resolution copy and the range
-        penalty.
+        Everything not in the paper is switched off: the teacher, the
+        confidence target, the low-resolution copy and the range penalty.
+
+        **This is the whole objective.** The paper's NSCE term is anchored on
+        ground-truth disparity and so has no label-free form; it is simply absent
+        rather than replaced. The cost volume is therefore trained only by the
+        gradient that reaches it back through the soft-argmin.
 
         **Note.** Monodepth sums this over four output scales. The closest
         analogue here is ``low_resolution``, which applies the photometric and
         smoothness terms at cost-volume scale; it is 0.0 in this preset because
         the paper's objective as usually quoted has three terms. Set it to 1.0
         for a closer match to the paper's multi-scale behaviour.
+
         """
         return cls(photometric=1.0, left_right=1.0, smoothness=0.1,
                    low_resolution=0.0, pseudo=0.0, confidence=0.0,
-                   cost_volume=0.0, range_penalty=0.0)
+                   range_penalty=0.0)
 
 
 @dataclass

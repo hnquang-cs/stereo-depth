@@ -1,23 +1,19 @@
-"""Label-free shaping of the cost volume.
+"""Block matching: photometric cost volumes built from the two images alone.
 
-The paper trains its cost volume with a Noise-Sampling Cross-Entropy loss whose
-target is a peak at the **ground-truth** disparity. Removing that -- as this
-project must -- leaves the cost volume with only the indirect gradient that
-reaches it through soft-argmin, which says "move the expected disparity" rather
-than "the match is at index k". Measured on a synthetic scene, that is not
-enough: the coarse disparity sat at the midpoint of its search range and moved
-1.4 px in 600 steps while the refinement network reduced the photometric loss by
-other means. The network reconstructed well and matched nothing.
+These are *measurement* utilities, not a loss. Nothing here is trained and
+nothing here is part of either paper's objective -- they exist so that the
+disparity search range can be calibrated from images without ground truth
+(:mod:`stereo.data.calibration`) and so that block matching is available as a
+baseline to measure a trained model against.
 
-The fix is that **the true matching cost needs no labels**. For every candidate
-disparity you can warp the source view and measure the photometric residual
-directly; the resulting volume is a genuine, dense, per-pixel cost. Distilling
-the learned cost volume toward it is the label-free analogue of the paper's NSCE
-loss -- same cross-entropy form, with the target anchored on photometric
-evidence instead of on ground truth.
+They read the rectified left and right images only. No ground truth.
 
-Nothing here reads ground truth: the target is computed from the two input
-images alone.
+History: these grew out of a cost-volume loss that has since been removed. That
+loss was a label-free stand-in for the paper's NSCE term, which cannot be used
+here because NSCE is anchored on ground-truth disparity. Substituting an invented
+loss for it was a deviation from "reimplement the paper", so the loss is gone;
+the block-matching utilities it was built on are kept because they are useful on
+their own and carry no such baggage.
 """
 
 from __future__ import annotations
@@ -167,114 +163,3 @@ def _fit_to_pooled_size(reference: torch.Tensor, source: torch.Tensor,
         reference = F.pad(reference, pad, mode="replicate")
         source = F.pad(source, pad, mode="replicate")
     return reference, source
-
-
-class CostVolumeLoss(nn.Module):
-    """Cross-entropy from the network's cost volume to a photometric target.
-
-    Mirrors the paper's NSCE formulation -- a soft target over disparities,
-    cross-entropy against ``log_softmax(-cost)`` -- but builds the target from
-    photometric evidence rather than ground truth.
-
-    The target must be judged by its **expectation**, not its argmin, because
-    soft-argmin takes the expectation. A target can have a near-perfect argmin
-    and still be useless: measured on a test scene, a target whose argmin was
-    0.78 px from the truth had an expectation of 9.14 against a true disparity of
-    2.49, because a long tail across the other candidates dragged the mean up.
-    Training fitted that target faithfully and produced exactly that wrong
-    disparity.
-
-    The cost is therefore standardised per pixel before the softmin -- shifted by
-    the best candidate's cost and divided by the spread across candidates -- so
-    ``temperature`` means the same thing regardless of image contrast, exposure
-    or noise, none of which a fixed absolute temperature survives.
-
-    Args:
-        temperature: sharpness of the target, in units of the per-pixel cost
-            spread. Lower is more peaked; too low and photometric noise becomes
-            a hard, wrong label.
-        min_confidence: skip pixels whose target is nearly uniform. In textureless
-            regions every disparity matches equally well and the target carries no
-            information, so imitating it would inject noise.
-    """
-
-    def __init__(self, temperature: float = 0.08, min_confidence: float = 0.05,
-                 window: int = MATCH_WINDOW):
-        super().__init__()
-        self.temperature = temperature
-        self.min_confidence = min_confidence
-        self.window = window
-
-    def forward(self, cost: torch.Tensor, reference: torch.Tensor, source: torch.Tensor,
-                direction: str = "left",
-                valid_mask: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
-        """Args:
-            cost: ``(B, D, h, w)`` the network's aggregated cost volume.
-            reference / source: images at **full** resolution. Matching is done
-                there and pooled down; see :func:`pooled_photometric_cost_volume`
-                for why matching on downsampled images fails.
-        """
-        num_disparities = cost.shape[1]
-        scale = max(1, round(reference.shape[-1] / cost.shape[-1]))
-        with torch.no_grad():
-            if scale > 1:
-                # The model pads its input to a multiple of its stride and crops
-                # the output, so the cost volume's size is not always
-                # floor(H / scale). Fit the images to exactly cost_size * scale
-                # first, or the pooled target comes out a row or column short.
-                reference, source = _fit_to_pooled_size(reference, source,
-                                                        cost.shape[-2:], scale)
-                photometric, valid = pooled_photometric_cost_volume(
-                    reference, source, num_disparities, scale, direction, self.window)
-            else:
-                photometric, valid = photometric_cost_volume(
-                    reference, source, num_disparities, direction, self.window)
-            # Standardise per pixel so the temperature is scale-free: subtract the
-            # best candidate's cost and divide by the spread across candidates.
-            # Invalid candidates are pushed far up so they cannot win.
-            masked = photometric + (1.0 - valid) * 1e3
-            best = masked.min(dim=1, keepdim=True).values
-            spread = masked.masked_fill(valid < 0.5, float("nan"))
-            spread = (torch.nanmean((spread - best).abs(), dim=1, keepdim=True)
-                      .nan_to_num(1.0).clamp(min=1e-6))
-            standardised = (masked - best) / spread
-
-            # Softmin over candidates: the distribution photometric evidence implies.
-            target = F.softmin(standardised / self.temperature, dim=1)
-            target = target * valid
-            target = target / target.sum(dim=1, keepdim=True).clamp(min=1e-6)
-
-            # How peaked that target is, as 1 - normalised entropy. Flat means the
-            # region is ambiguous (textureless or repetitive) and teaches nothing.
-            #
-            # Normalised by the number of *valid* candidates, not by D. Near the
-            # image border only a few disparities are valid at all, so a target
-            # that is uniform over those few still has low absolute entropy and
-            # would look confident -- measured at 13.5% of a blank image being
-            # "supervised" before this correction.
-            entropy = -(target * torch.log(target.clamp(min=1e-8))).sum(dim=1, keepdim=True)
-            candidates = valid.sum(dim=1, keepdim=True).clamp(min=2.0)
-            confidence = 1.0 - entropy / torch.log(candidates)
-            weight = (confidence > self.min_confidence).to(cost.dtype)
-
-            # Pixels near the left border cannot be evaluated at every disparity,
-            # so their target is computed over a truncated candidate set and is
-            # biased low regardless of the evidence. Supervising them teaches the
-            # cost volume a ramp. Require the full search to have been available.
-            weight = weight * (candidates >= num_disparities).to(cost.dtype)
-
-            # Rows the collate padded onto a ragged batch are replicated pixels:
-            # they match each other perfectly at every disparity, so they would
-            # otherwise contribute a confident, meaningless target.
-            if valid_mask is not None:
-                weight = weight * valid_mask.to(cost.dtype)
-
-        log_probability = F.log_softmax(-cost, dim=1)
-        per_pixel = -(target * log_probability).sum(dim=1, keepdim=True)
-        total = weight.sum()
-        loss = (per_pixel * weight).sum() / total.clamp(min=1.0)
-        return {
-            "loss": loss,
-            "target_confidence": confidence.mean().detach(),
-            "supervised_ratio": (total / weight.numel()).detach(),
-        }

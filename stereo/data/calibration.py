@@ -32,7 +32,7 @@ import torch
 import torch.nn.functional as F
 
 from ..geometry import RESIZE_ALIGN_CORNERS
-from ..losses.cost_volume_loss import MATCH_WINDOW, pooled_photometric_cost_volume
+from ..block_matching import MATCH_WINDOW, pooled_photometric_cost_volume
 
 #: A match counts as reliable when the best cost is at least this much better
 #: than the best cost outside the peak. Classic ratio test; 0.8 is Lowe's value.
