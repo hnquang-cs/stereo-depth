@@ -241,3 +241,43 @@ def test_padded_rows_do_not_contribute_to_the_objective():
     masked = objective(outputs, {"left": left, "right": right}, valid_mask=mask, **common)
     assert float(masked["loss"]) != float(unmasked["loss"]), "the mask had no effect"
     assert torch.isfinite(masked["loss"])
+
+
+# -- correlation aggregation ------------------------------------------------ #
+
+def test_correlation_aggregation_is_parameter_free_and_range_independent():
+    """The property the conv2d aggregation cannot have.
+
+    CostAggregation flattens the disparity axis into channels, so every layer
+    after it has a channel count proportional to D: the search range becomes
+    part of the weights and parameters grow as D-squared. Correlation has no
+    parameters in that stage at all, so one checkpoint serves any range.
+    """
+    sizes = {nd: StereoNet(StereoNetConfig(num_disparities=nd,
+                                           aggregation="correlation")).num_parameters()
+             for nd in (64, 128, 320)}
+    assert len(set(sizes.values())) == 1, f"parameter count varied with D: {sizes}"
+
+    conv2d = {nd: StereoNet(StereoNetConfig(num_disparities=nd)).num_parameters()
+              for nd in (64, 128, 320)}
+    assert len(set(conv2d.values())) == 3, "conv2d should scale with D; the contrast is the point"
+
+    # And the weights really do transfer across search ranges.
+    narrow = StereoNet(StereoNetConfig(num_disparities=64, aggregation="correlation"))
+    wide = StereoNet(StereoNetConfig(num_disparities=320, aggregation="correlation"))
+    wide.load_state_dict(narrow.state_dict())
+
+
+def test_correlation_aggregation_produces_a_usable_cost_volume():
+    net = StereoNet(StereoNetConfig(num_disparities=64, aggregation="correlation")).eval()
+    with torch.no_grad():
+        outputs = net(torch.rand(1, 3, 128, 256), torch.rand(1, 3, 128, 256))["left"]
+    assert outputs["cost"].shape[1] == net.num_disparities_small
+    assert outputs["disparity"].shape[-2:] == (128, 256)
+    for key in ("disparity", "cost", "matchability", "confidence"):
+        assert torch.isfinite(outputs[key]).all(), key
+
+
+def test_unknown_aggregation_is_rejected():
+    with pytest.raises(ValueError, match="aggregation must be"):
+        StereoNet(StereoNetConfig(aggregation="nonsense"))

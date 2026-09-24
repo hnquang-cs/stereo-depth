@@ -785,6 +785,66 @@ are published figures rather than something checked here. `DISPARITY_RANGE =
 "auto"` runs `calibrate_disparity_range` on the actual training mixture and
 should be preferred over this default when the data is to hand.
 
+## 16j. Measured: the aggregation, on real data
+
+Asked whether softmax/soft-argmin could replace the 3D/2D aggregation
+(the arrangement in arXiv:2005.08806's figure). Measured both under the
+Monodepth objective on the real Middlebury `Motorcycle` pair at 640x384 with
+`num_disparities=64`, 500 steps, ground truth used only to score:
+
+| | MAE | prediction std |
+|---|---:|---:|
+| predict-the-mean | 12.91 | -- |
+| block matching, no network | 5.38 | -- |
+| `conv2d` (the paper's aggregation) | 5.27 | 10.09 |
+| **`correlation`** | **3.49** | **14.20** |
+| *ground truth* | -- | *13.9* |
+
+`correlation` is 34% better than the paper's aggregation and **35% better than
+block matching** -- the first configuration measured here that beats a classical
+matcher. Its photometric loss is also lower (0.0482 against 0.0759), so the
+improvement is not a metric artefact: it reconstructs the images better as well.
+
+The prediction-spread column is the qualitative story. `conv2d` produces a field
+with 73% of the true variation and visibly washes the foreground into the
+background; `correlation` matches the true spread almost exactly. See
+`docs/figures/aggregation-on-real-data.png`.
+
+### Why
+
+`CostAggregation` runs one 3D convolution and then **flattens the disparity axis
+into channels**, so every 2D layer after it has a channel count proportional to
+``D``. That has three costs:
+
+1. `num_disparities` becomes part of the weights, so a checkpoint cannot be
+   loaded at another search range and one model cannot serve arbitrary
+   resolutions.
+2. Parameters grow as ``D**2``: 120,584 at ``D=16`` against 2,899,784 at ``D=80``.
+3. The *ordering* of the disparity axis is discarded -- channels ``k`` and
+   ``k+1`` become unrelated, and the network must learn that they are adjacent
+   hypotheses.
+
+`CorrelationAggregation` has no parameters at all in that stage: the dot product
+is the cost, and soft-argmin reads it directly. Measured at ``D=32``, 640x384,
+the stage drops from 470 ms to 1 ms, and a checkpoint trained at ndisp 64 loads
+and runs at ndisp 320 (`test_correlation_aggregation_is_parameter_free_and_range_independent`).
+
+### Limits of this evidence
+
+One image pair, one seed, 500 steps, fitted to that pair rather than generalising
+across a dataset. On a *synthetic* 5-pair task the two were much closer (9.98 vs
+10.43 MAE) with the same spread gap (6.98 vs 17.77), so the spread difference has
+replicated and the MAE difference has not. `conv2d` remains the default until
+this is confirmed across seeds and on more data; `correlation` is available via
+`StereoNetConfig(aggregation="correlation")`.
+
+### A configuration note that matters more than the architecture
+
+Both arms beat block matching's 5.38 px here, where earlier runs at
+`num_disparities=320` produced flat, blobby output. The search range mattered
+more than the aggregation: at ndisp 64 even the unchanged architecture reaches
+5.27 px. See 16c.
+
 ## 17. Limitations
 
 1. **No benchmark numbers.** Nothing about accuracy is claimed. Every component is tested;

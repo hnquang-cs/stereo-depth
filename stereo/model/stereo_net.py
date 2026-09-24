@@ -29,7 +29,7 @@ import torch
 import torch.nn as nn
 
 from ..geometry import compute_num_disparities, flip_lr, pad_to_multiple, unpad
-from .aggregation import CostAggregation
+from .aggregation import CorrelationAggregation, CostAggregation
 from .cost_volume import CorrelationCostVolume, Matchability, SoftArgmin, confidence_from_matchability
 from .feature_extractor import FeatureExtractor
 from .refinement import DisparityRefinement
@@ -59,6 +59,13 @@ class StereoNetConfig:
     #: range. Inference on an image of any other width resizes to this width and
     #: scales the result back (:func:`stereo.model.predict_disparity`).
     canonical_width: int = 640
+    #: ``"conv2d"`` is the paper's aggregation: one 3D convolution, then the
+    #: disparity axis flattened into channels and 2D convolutions over it.
+    #: ``"correlation"`` skips it entirely -- the dot product IS the cost -- which
+    #: costs no parameters, keeps the disparity axis ordered, and makes nothing in
+    #: the matching stage depend on ``num_disparities``, so one checkpoint serves
+    #: any search range. See :class:`~stereo.model.aggregation.CorrelationAggregation`.
+    aggregation: str = "conv2d"
     #: Restrict the soft-argmin expectation to ``+/- window`` bins around the cost
     #: minimum. ``None``, the reference implementation's full expectation, is the
     #: default **because the restriction did not replicate end to end**: it is a
@@ -117,8 +124,15 @@ class StereoNet(nn.Module):
             backbone_width=self.config.backbone_width,
             out_scale=scale)
         self.cost_volume = CorrelationCostVolume(self.num_disparities_small)
-        self.aggregation = CostAggregation(self.config.feature_channels, self.num_disparities_small,
-                                           self.config.cost_volume_channels)
+        if self.config.aggregation == "correlation":
+            self.aggregation = CorrelationAggregation()
+        elif self.config.aggregation == "conv2d":
+            self.aggregation = CostAggregation(self.config.feature_channels,
+                                               self.num_disparities_small,
+                                               self.config.cost_volume_channels)
+        else:
+            raise ValueError(f"aggregation must be 'conv2d' or 'correlation', "
+                             f"got {self.config.aggregation!r}")
         self.soft_argmin = SoftArgmin(window=self.config.soft_argmin_window)
         self.matchability = Matchability()
         limit = (self.config.residual_limit_fraction * self.max_disparity
