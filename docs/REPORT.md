@@ -834,9 +834,15 @@ and runs at ndisp 320 (`test_correlation_aggregation_is_parameter_free_and_range
 One image pair, one seed, 500 steps, fitted to that pair rather than generalising
 across a dataset. On a *synthetic* 5-pair task the two were much closer (9.98 vs
 10.43 MAE) with the same spread gap (6.98 vs 17.77), so the spread difference has
-replicated and the MAE difference has not. `conv2d` remains the default until
-this is confirmed across seeds and on more data; `correlation` is available via
-`StereoNetConfig(aggregation="correlation")`.
+replicated and the MAE difference has not. `correlation` is **now the default**, set on the strength of the real-data result
+above and of the structural advantages (no parameters in the matching stage, so
+the search range is not part of the weights; 1 ms against 470). `conv2d` remains
+available via `StereoNetConfig(aggregation="conv2d")` and is what the
+5,661,646-parameter fidelity match against `mmstereo` is built from -- use it to
+reproduce the paper's architecture exactly.
+
+The caveat above still stands: the MAE gap is one pair and one seed, and did not
+replicate on the synthetic task. The prediction-spread gap did replicate.
 
 ### A configuration note that matters more than the architecture
 

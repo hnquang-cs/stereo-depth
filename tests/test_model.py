@@ -7,9 +7,9 @@ from stereo.geometry import flip_lr
 from stereo.model import StereoNet, StereoNetConfig, correlation_volume, matchability, soft_argmin
 
 
-def small_config(width=224, downsample=4):
+def small_config(width=224, downsample=4, **kwargs):
     return StereoNetConfig.for_width(width, downsample=downsample, backbone_width=8,
-                                     feature_channels=8)
+                                     feature_channels=8, **kwargs)
 
 
 @pytest.mark.parametrize("height,width", [(224, 224), (240, 320), (384, 384), (192, 640)])
@@ -120,12 +120,23 @@ def test_checkpoint_roundtrip_rebuilds_the_architecture(tmp_path):
 
 
 def test_num_disparities_is_baked_into_the_weights():
-    """Documented limitation: the search range is part of the architecture."""
-    narrow = StereoNet(small_config(224))
-    wide = StereoNet(small_config(1024))
+    """Documented limitation: the search range is part of the architecture.
+
+    Pinned to aggregation="conv2d": this documents a property of the
+    paper's aggregation, which flattens D into channels. The default
+    "correlation" does not have it, which is one reason it is the default.
+    """
+    narrow = StereoNet(small_config(224, aggregation="conv2d"))
+    wide = StereoNet(small_config(1024, aggregation="conv2d"))
     assert narrow.num_disparities == 112 and wide.num_disparities == 384
     with pytest.raises(RuntimeError):
         wide.load_state_dict(narrow.state_dict())
+
+    # The default aggregation does not have this limitation.
+    a = StereoNet(small_config(224))
+    b = StereoNet(small_config(1024))
+    assert a.num_disparities != b.num_disparities
+    b.load_state_dict(a.state_dict())
 
 
 def test_refinement_starts_as_an_exact_identity():
@@ -146,8 +157,10 @@ def test_refinement_starts_as_an_exact_identity():
         net = StereoNet(StereoNetConfig.for_width(224)).eval()
         with torch.no_grad():
             outputs = net(torch.rand(1, 3, 224, 224), torch.rand(1, 3, 224, 224))["left"]
-        coarse = F.interpolate(outputs["disparity_small"] * 4, size=(224, 224),
-                               mode="bilinear", align_corners=False)
+        # Upsample THEN scale, the order the refinement itself uses -- the two
+        # orders are equal mathematically but not bitwise in float32.
+        coarse = F.interpolate(outputs["disparity_small"], size=(224, 224),
+                               mode="bilinear", align_corners=False) * 4
         assert torch.equal(outputs["disparity"], coarse), (
             f"seed {seed}: refinement is not an identity at init "
             f"(ratio {float(outputs['disparity'].mean() / coarse.mean()):.3f}x)")

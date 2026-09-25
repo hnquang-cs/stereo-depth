@@ -70,7 +70,8 @@ def count(module):
 @pytest.mark.parametrize("num_disparities,downsample", [(256, 4), (256, 8)])
 def test_parameter_count_matches_the_reference(num_disparities, downsample):
     reference = load_reference(num_disparities, downsample, 16, 16)
-    mine = StereoNet(StereoNetConfig(num_disparities=num_disparities, downsample=downsample,
+    mine = StereoNet(StereoNetConfig(aggregation="conv2d",
+                                     num_disparities=num_disparities, downsample=downsample,
                                      feature_channels=16, backbone_width=16,
                                      cost_volume_channels=4))
     assert count(mine) == count(reference)
@@ -78,7 +79,8 @@ def test_parameter_count_matches_the_reference(num_disparities, downsample):
 
 def test_per_component_parameter_counts_match_the_reference():
     reference = load_reference(256, 4, 16, 16)
-    mine = StereoNet(StereoNetConfig(num_disparities=256, downsample=4, feature_channels=16,
+    mine = StereoNet(StereoNetConfig(aggregation="conv2d",
+                                     num_disparities=256, downsample=4, feature_channels=16,
                                      backbone_width=16, cost_volume_channels=4))
     assert count(mine.feature_extractor) == count(reference.features) + count(reference.score_features)
     assert count(mine.aggregation) == count(reference.process_cost_volume)
@@ -87,7 +89,8 @@ def test_per_component_parameter_counts_match_the_reference():
 
 def test_output_shapes_and_disparity_bounds_match_the_reference():
     reference = load_reference(256, 4, 16, 16).eval()
-    mine = StereoNet(StereoNetConfig(num_disparities=256, downsample=4, feature_channels=16,
+    mine = StereoNet(StereoNetConfig(aggregation="conv2d",
+                                     num_disparities=256, downsample=4, feature_channels=16,
                                      backbone_width=16, cost_volume_channels=4)).eval()
     left, right = torch.rand(1, 3, 128, 256), torch.rand(1, 3, 128, 256)
     with torch.no_grad():

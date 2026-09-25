@@ -18,9 +18,14 @@ from stereo.model.cost_volume import soft_argmin
 # -- the reason the range must be fixed ------------------------------------- #
 
 def test_width_derived_range_produces_incompatible_checkpoints():
-    """Why ``min(width // 2, 384)`` cannot give one resolution-robust model."""
-    big = StereoNet(StereoNetConfig.for_width(640))
-    small = StereoNet(StereoNetConfig.for_width(224))
+    """Why ``min(width // 2, 384)`` cannot give one resolution-robust model.
+
+    Pinned to aggregation="conv2d": this documents a property of the
+    paper's aggregation, which flattens D into channels. The default
+    "correlation" does not have it, which is one reason it is the default.
+    """
+    big = StereoNet(StereoNetConfig.for_width(aggregation="conv2d", width=640))
+    small = StereoNet(StereoNetConfig.for_width(aggregation="conv2d", width=224))
     assert big.num_disparities != small.num_disparities
     with pytest.raises(RuntimeError, match="size mismatch"):
         small.load_state_dict(big.state_dict())
@@ -258,7 +263,8 @@ def test_correlation_aggregation_is_parameter_free_and_range_independent():
              for nd in (64, 128, 320)}
     assert len(set(sizes.values())) == 1, f"parameter count varied with D: {sizes}"
 
-    conv2d = {nd: StereoNet(StereoNetConfig(num_disparities=nd)).num_parameters()
+    conv2d = {nd: StereoNet(StereoNetConfig(num_disparities=nd,
+                                            aggregation="conv2d")).num_parameters()
               for nd in (64, 128, 320)}
     assert len(set(conv2d.values())) == 3, "conv2d should scale with D; the contrast is the point"
 

@@ -59,13 +59,23 @@ class StereoNetConfig:
     #: range. Inference on an image of any other width resizes to this width and
     #: scales the result back (:func:`stereo.model.predict_disparity`).
     canonical_width: int = 640
+    #: ``"correlation"`` (default): the dot product over the feature channel IS
+    #: the cost, read directly by soft-argmin. No parameters in this stage, so
+    #: nothing in it depends on ``num_disparities`` -- one checkpoint serves any
+    #: search range -- and it runs in 1 ms where the alternative takes 470.
+    #: Measured on the real Middlebury pair under the Monodepth objective:
+    #: 3.49 px against 5.27 for ``"conv2d"`` and 5.38 for block matching, with a
+    #: prediction spread of 14.20 against a true 13.9 (``conv2d``: 10.09).
+    #:
     #: ``"conv2d"`` is the paper's aggregation: one 3D convolution, then the
-    #: disparity axis flattened into channels and 2D convolutions over it.
-    #: ``"correlation"`` skips it entirely -- the dot product IS the cost -- which
-    #: costs no parameters, keeps the disparity axis ordered, and makes nothing in
-    #: the matching stage depend on ``num_disparities``, so one checkpoint serves
-    #: any search range. See :class:`~stereo.model.aggregation.CorrelationAggregation`.
-    aggregation: str = "conv2d"
+    #: disparity axis flattened into channels and 2D convolutions over it. Use it
+    #: to reproduce arXiv:2109.11644 exactly -- it is what the 5,661,646-parameter
+    #: fidelity match is built from. Its cost is that ``num_disparities`` becomes
+    #: part of the weights and parameters grow as ``D**2``.
+    #:
+    #: See :class:`~stereo.model.aggregation.CorrelationAggregation` and
+    #: docs/REPORT.md 16j.
+    aggregation: str = "correlation"
     #: Restrict the soft-argmin expectation to ``+/- window`` bins around the cost
     #: minimum. ``None``, the reference implementation's full expectation, is the
     #: default **because the restriction did not replicate end to end**: it is a
