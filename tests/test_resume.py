@@ -177,3 +177,59 @@ def test_resuming_keeps_the_best_score_so_a_worse_checkpoint_cannot_overwrite_it
 
     assert resumed.best_metric == pytest.approx(best_before), \
         "the best label-free score must carry over, or a worse checkpoint overwrites the best"
+
+
+def test_the_archive_holds_the_whole_run_not_just_checkpoints(tmp_path):
+    """One file carries everything: weights, history, config, visualisations."""
+    from stereo.utils import archive_contents, package_run
+
+    output = tmp_path / "out"
+    (output / "visualizations").mkdir(parents=True)
+    (output / "last.pt").write_text("w")
+    (output / "best.pt").write_text("w")
+    (output / "history.json").write_text("[]")
+    (output / "config.yaml").write_text("model: {}")
+    (output / "metrics.json").write_text("{}")
+    (output / "visualizations" / "epoch_0005.png").write_text("png")
+
+    members = set(archive_contents(package_run(str(output))))
+    assert members == {"last.pt", "best.pt", "history.json", "config.yaml", "metrics.json",
+                       os.path.join("visualizations", "epoch_0005.png")}
+
+
+def test_repackaging_does_not_nest_the_previous_archive(tmp_path):
+    """Otherwise every resume buries a copy of the last archive and the file
+    grows without bound."""
+    from stereo.utils import ARCHIVE_NAME, archive_contents, package_run
+
+    output = tmp_path / "out"
+    output.mkdir()
+    (output / "last.pt").write_text("w")
+
+    for _ in range(3):
+        archive = package_run(str(output))
+    members = set(archive_contents(archive))
+    assert ARCHIVE_NAME not in members
+    assert members == {"last.pt"}
+
+
+def test_restoring_brings_back_visualisations_and_config_too(tmp_path):
+    """A resumed run should look like the old one continued, not like a fresh
+    run that happens to start from old weights."""
+    from stereo.utils import package_run, restore_run
+
+    source = tmp_path / "source"
+    (source / "visualizations").mkdir(parents=True)
+    (source / "last.pt").write_text("weights")
+    (source / "history.json").write_text('[{"epoch": 0}]')
+    (source / "config.yaml").write_text("model: {}")
+    (source / "visualizations" / "epoch_0000.png").write_text("png")
+    archive = package_run(str(source))
+
+    destination = tmp_path / "resumed"
+    found = restore_run(archive, str(destination))
+
+    assert set(found) == {"last.pt", "history.json"}
+    assert (destination / "config.yaml").read_text() == "model: {}"
+    assert (destination / "visualizations" / "epoch_0000.png").read_text() == "png"
+    assert (destination / "history.json").read_text() == '[{"epoch": 0}]'

@@ -23,7 +23,17 @@ from typing import Dict, List, Optional
 #: Files a resumable run consists of. ``last.pt`` continues training;
 #: ``best.pt`` is the best label-free checkpoint; ``history.json`` keeps the
 #: curves continuous across sessions.
+#: What the trainer needs in order to resume. Everything else in the output
+#: directory is carried in the archive too, but these are what restore hunts for
+#: and lifts to the top of the output directory, whatever folder they sat in.
 RUN_FILES = ("last.pt", "best.pt", "history.json")
+
+#: Name of the single archive holding a whole run.
+ARCHIVE_NAME = "run_artifacts.zip"
+
+#: Never packaged: the archive itself (which would nest a copy of the previous
+#: one on every resume, growing without bound) and restore's scratch directory.
+PACKAGE_EXCLUDE = (ARCHIVE_NAME, "checkpoints.zip", "_restore")
 
 #: The shapes a Google Drive link comes in.
 DRIVE_ID_PATTERNS = (
@@ -180,6 +190,21 @@ def restore_run(source: str, output_dir: str, workspace: Optional[str] = None) -
                     shutil.copy(source_path, target)
                 found[filename] = target
 
+    # Everything that is not a run file is restored too, keeping its relative
+    # layout, so visualisations and the resolved config survive a resume rather
+    # than only the checkpoints.
+    for directory, _, filenames in os.walk(workspace):
+        for filename in filenames:
+            if filename in RUN_FILES or filename == "checkpoints_archive":
+                continue
+            source_path = os.path.join(directory, filename)
+            relative = os.path.relpath(source_path, workspace)
+            target = os.path.join(output_dir, relative)
+            if os.path.abspath(source_path) == os.path.abspath(target):
+                continue
+            os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+            shutil.copy(source_path, target)
+
     if not found:
         raise FileNotFoundError(
             f"the archive contains none of {RUN_FILES}.\n"
@@ -192,15 +217,38 @@ def restore_run(source: str, output_dir: str, workspace: Optional[str] = None) -
 
 
 def package_run(output_dir: str, archive_path: Optional[str] = None) -> Optional[str]:
-    """Zip this run's checkpoints, ready to upload for the next session.
+    """Zip the **whole** output directory into one archive.
+
+    Checkpoints, history, the resolved config, visualisations and any evaluation
+    output all travel together, so a run is one file to download, upload to
+    Drive, and hand back to ``RESUME_ARCHIVE`` next session.
+
+    The archive itself is excluded, or each resume would nest a copy of the
+    previous archive inside the next one and the file would grow without bound.
 
     Returns the archive path, or ``None`` if there is nothing to package.
     """
-    present = [name for name in RUN_FILES if os.path.isfile(os.path.join(output_dir, name))]
-    if not present:
+    archive_path = archive_path or os.path.join(output_dir, ARCHIVE_NAME)
+    archive_real = os.path.abspath(archive_path)
+
+    members = []
+    for directory, dirnames, filenames in os.walk(output_dir):
+        dirnames[:] = [d for d in dirnames if d not in PACKAGE_EXCLUDE]
+        for filename in filenames:
+            path = os.path.join(directory, filename)
+            if filename in PACKAGE_EXCLUDE or os.path.abspath(path) == archive_real:
+                continue
+            members.append((path, os.path.relpath(path, output_dir)))
+
+    if not members:
         return None
-    archive_path = archive_path or os.path.join(output_dir, "checkpoints.zip")
     with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
-        for name in present:
-            archive.write(os.path.join(output_dir, name), arcname=name)
+        for path, arcname in sorted(members, key=lambda m: m[1]):
+            archive.write(path, arcname=arcname)
     return archive_path
+
+
+def archive_contents(archive_path: str) -> Dict[str, int]:
+    """``{member: bytes}`` for a packaged run, for printing what was saved."""
+    with zipfile.ZipFile(archive_path) as archive:
+        return {info.filename: info.file_size for info in archive.infolist()}
