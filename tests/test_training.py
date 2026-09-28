@@ -3,6 +3,8 @@
 import cv2
 import numpy as np
 import pytest
+import pathlib
+
 import torch
 
 from stereo.config import Config, LossWeights
@@ -313,3 +315,39 @@ def test_the_default_objective_is_monodepth_and_logs_only_its_terms():
     expected = (weights.photometric * result["logs"]["photometric"]
                 + weights.smoothness * result["logs"]["smoothness"])
     assert result["logs"]["total"] > expected, "left_right must contribute too"
+
+
+def test_visualisation_is_one_row_per_sample_with_four_panels(unlabeled_dataset, tmp_path):
+    """Layout contract: each sample gets its own row of left / right / disparity
+    / warped, and each row is sized to that sample's own aspect ratio rather than
+    to the padded batch height."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from stereo.data.augmentation import GeometricAugmentConfig, PhotometricAugmentConfig, ResizeConfig
+    from stereo.data.registry import DatasetSpec
+    from stereo.training import Trainer
+
+    config = Config()
+    config.model = StereoNetConfig.for_width(96, downsample=4, backbone_width=4, feature_channels=4)
+    config.dynamic_disparity = False
+    config.data.train = [DatasetSpec(type="folder", root=unlabeled_dataset)]
+    config.data.validation = [DatasetSpec(type="folder", root=unlabeled_dataset)]
+    config.data.resize = ResizeConfig(48, 96)
+    config.data.photometric_augmentation = PhotometricAugmentConfig(enabled=False)
+    config.data.geometric_augmentation = GeometricAugmentConfig(enabled=False)
+    config.training.output_dir = str(tmp_path / "out")
+    config.training.num_workers = 0
+    config.training.batch_size = 2
+    config.training.visualize_samples = 2
+    trainer = Trainer(config, device=torch.device("cpu"))
+    path = trainer.save_visualization(0)
+    assert path is not None and pathlib.Path(path).exists()
+
+    figures = [plt.figure(n) for n in plt.get_fignums()]
+    assert not figures, "the figure must be closed, or a long run leaks them"
+
+    from PIL import Image
+    with Image.open(path) as image:
+        assert image.width > image.height, "four columns should be wider than tall"

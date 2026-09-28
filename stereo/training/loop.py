@@ -21,6 +21,7 @@ import os
 import time
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -342,23 +343,30 @@ class Trainer:
 
     @torch.no_grad()
     def save_visualization(self, epoch: int) -> Optional[str]:
-        """Write a left / right / predicted-disparity figure for this epoch.
+        """Write one row per sample: left, right, predicted disparity, warped right.
 
-        Drawn from the validation loader when there is one, otherwise from the
-        training loader, and always from the *clean* (un-jittered) images so the
-        panel shows what the model actually sees geometrically. Purely a
-        monitoring artefact: no ground truth is involved, and nothing here feeds
+        The fourth panel is the *reconstruction* -- the right view warped into the
+        left by the predicted disparity. It is what the photometric loss actually
+        compares against the left image, so putting it beside the left view makes
+        the training signal directly readable: where the warp looks like the left
+        image the disparity is right, and where it smears or doubles it is wrong.
+
+        Drawn from the validation loader when there is one, otherwise the
+        training loader, always from the *clean* (un-jittered) images. Purely a
+        monitoring artefact: no ground truth is involved and nothing here feeds
         back into the objective.
         """
         try:
-            from ..utils.visualization import HAVE_MATPLOTLIB, colorize, save_evaluation_figure, \
-                to_numpy_image
+            from ..utils.visualization import HAVE_MATPLOTLIB, colorize, to_numpy_image
         except Exception as error:                      # pragma: no cover
             print(f"  visualisation unavailable: {error}")
             return None
         if not HAVE_MATPLOTLIB:
             print("  visualisation skipped: matplotlib is not installed")
             return None
+        import matplotlib.pyplot as plt
+
+        from ..geometry import warp_right_to_left
 
         loader = self.val_loader or self.train_loader
         try:
@@ -369,12 +377,15 @@ class Trainer:
         was_training = self.model.training
         self.model.eval()
         views = self._prepare(batch, augment=False)
-        outputs = self.model(views["clean_left"], views["clean_right"], directions=("left",))
-        disparity = outputs["left"]["disparity"]
-        confidence = outputs["left"]["confidence"]
-        small = outputs["left"]["disparity_small"]
-        coarse = torch.nn.functional.interpolate(
-            small, size=disparity.shape[-2:], mode="bilinear", align_corners=False) * self.model.scale
+        left, right = views["clean_left"], views["clean_right"]
+        with torch.no_grad():
+            outputs = self.model(left, right, directions=("left",))["left"]
+            disparity = outputs["disparity"]
+            warped, valid = warp_right_to_left(right, disparity)
+            residual = ((warped - left).abs().mean(dim=1, keepdim=True) * valid)
+            coarse = torch.nn.functional.interpolate(
+                outputs["disparity_small"], size=disparity.shape[-2:],
+                mode="bilinear", align_corners=False) * self.model.scale
         if was_training:
             self.model.train()
 
@@ -382,25 +393,70 @@ class Trainer:
         os.makedirs(directory, exist_ok=True)
         path = os.path.join(directory, f"epoch_{epoch:04d}.png")
 
-        count = min(self.config.training.visualize_samples, disparity.shape[0])
-        panels = {}
+        # A ragged (aspect-preserving) batch is padded to its tallest member, so
+        # each sample is cropped back to its own real rows and given a figure row
+        # sized to its own aspect ratio. Otherwise a 1242x375 KITTI frame batched
+        # beside a 741x500 Middlebury one spends most of its row on padding.
+        padding = views.get("valid_mask")
+        count = max(min(self.config.training.visualize_samples, disparity.shape[0]), 1)
+        height, width = disparity.shape[-2:]
+
+        rows = []
         for index in range(count):
-            suffix = f" [{index}]" if count > 1 else ""
-            panels[f"left{suffix}"] = to_numpy_image(views["clean_left"][index:index + 1])
-            panels[f"right{suffix}"] = to_numpy_image(views["clean_right"][index:index + 1])
-            panels[f"disparity{suffix}"] = colorize(disparity[index])
-            # The cost volume's own estimate, before refinement. If this is flat
-            # or noise while the refined map looks detailed, the stereo matching
-            # is not working and the refinement is inventing the detail.
-            panels[f"cost volume{suffix}"] = colorize(coarse[index])
-            # Confidence comes free from the same forward pass and is the clearest
-            # early warning of the matchability head collapsing to "certain everywhere".
-            panels[f"confidence{suffix}"] = colorize(confidence[index], 0.0, 1.0, cmap="viridis")
-        save_evaluation_figure(
-            path, panels,
-            title=f"epoch {epoch}  |  disparity min {float(disparity.min()):.1f} "
-                  f"max {float(disparity.max()):.1f} mean {float(disparity.mean()):.1f} px "
-                  f"(model range 0..{self.model.max_disparity})")
+            valid_rows = height
+            if padding is not None:
+                column = padding[index, 0, :, 0]
+                valid_rows = max(int(column.sum().item()), 1)
+            rows.append(valid_rows)
+
+        panel_w = 4.6
+        heights = [panel_w * r / max(width, 1) for r in rows]
+        fig = plt.figure(figsize=(4 * panel_w, sum(heights) + 0.75), facecolor="white")
+        grid = fig.add_gridspec(count, 4, height_ratios=heights, wspace=0.03, hspace=0.10)
+
+        columns = ("left", "right", "predicted disparity", "right warped into left")
+        for row in range(count):
+            keep = slice(0, rows[row])
+            valid_here = valid[row][:, keep]
+            residual_here = residual[row][:, keep]
+            per_pixel = residual_here[valid_here > 0.5]
+            disparity_here = disparity[row][:, keep]
+            images = (to_numpy_image(left[row:row + 1, :, keep]),
+                      to_numpy_image(right[row:row + 1, :, keep]),
+                      colorize(disparity_here),
+                      to_numpy_image(warped[row:row + 1, :, keep]))
+            notes = (None, None,
+                     f"{float(disparity_here.min()):.1f} - {float(disparity_here.max()):.1f} px"
+                     f"   (range 0-{self.model.max_disparity})",
+                     "photometric residual "
+                     f"{float(per_pixel.mean()) if per_pixel.numel() else float('nan'):.4f}")
+
+            for position, (image, note, column) in enumerate(zip(images, notes, columns)):
+                axis = fig.add_subplot(grid[row, position])
+                axis.imshow(image, aspect="auto")
+                axis.set_xticks([])
+                axis.set_yticks([])
+                for spine in axis.spines.values():
+                    spine.set_edgecolor("#d9d9d9")
+                if row == 0:
+                    axis.set_title(column, fontsize=12, color="#222222", pad=8)
+                if position == 0 and count > 1:
+                    axis.set_ylabel(f"sample {row}", fontsize=10, color="#777777", labelpad=6)
+                if note:
+                    axis.text(0.015, 0.04, note, transform=axis.transAxes, fontsize=9,
+                              color="white", va="bottom", ha="left",
+                              bbox=dict(boxstyle="round,pad=0.32", facecolor="#000000",
+                                        alpha=0.58, edgecolor="none"))
+
+        refine = float((disparity - coarse).abs().mean())
+        fig.suptitle(
+            f"epoch {epoch}   |   disparity {float(disparity.min()):.1f}-"
+            f"{float(disparity.max()):.1f} px, mean {float(disparity.mean()):.1f}   |   "
+            f"refinement moves it {refine:+.2f} px   |   "
+            f"valid warp {float(valid.mean()) * 100:.0f}%",
+            fontsize=13, color="#222222", y=0.995)
+        fig.savefig(path, dpi=110, bbox_inches="tight", facecolor="white")
+        plt.close(fig)
         print(f"  visualisation -> {path}")
         return path
 
