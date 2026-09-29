@@ -35,6 +35,7 @@ import numpy as np
 import torch.nn.functional as F
 
 from ..geometry import RESIZE_ALIGN_CORNERS
+from .base import DISPARITY_KEYS, MASK_KEYS
 
 
 # --------------------------------------------------------------------------- #
@@ -180,14 +181,25 @@ class ResizeSample:
         reference = sample.get("left")
         if reference is None:
             return dict(sample)
-        height = self.target_height(reference.shape[0], reference.shape[1])
-        target = (self.config.width, height)  # cv2 takes (w, h)
+        source_height, source_width = reference.shape[0], reference.shape[1]
+        height = self.target_height(source_height, source_width)
+        target = (self.config.width, height)          # cv2 takes (w, h)
+        scale_x = self.config.width / max(source_width, 1)
+
         out = {}
         for key, value in sample.items():
-            if isinstance(value, np.ndarray) and value.ndim >= 2:
-                out[key] = cv2.resize(value, target, interpolation=cv2.INTER_LINEAR)
-            else:
+            if not (isinstance(value, np.ndarray) and value.ndim >= 2):
                 out[key] = value
+            elif key in DISPARITY_KEYS:
+                # Disparity is a LENGTH along x, so resizing must rescale its
+                # values as well as resample them. Nearest, because averaging
+                # across a depth discontinuity invents a disparity that is true
+                # on neither side of it.
+                out[key] = cv2.resize(value, target, interpolation=cv2.INTER_NEAREST) * scale_x
+            elif key in MASK_KEYS:
+                out[key] = cv2.resize(value, target, interpolation=cv2.INTER_NEAREST)
+            else:
+                out[key] = cv2.resize(value, target, interpolation=cv2.INTER_LINEAR)
         return out
 
 
@@ -277,6 +289,13 @@ class BatchGeometricAugment:
             if key in batch and batch[key] is not None:
                 out[key] = F.interpolate(batch[key], size=(new_height, new_width),
                                          mode="bilinear", align_corners=RESIZE_ALIGN_CORNERS)
+        # Same rule as the per-sample resize: disparity is rescaled by the
+        # horizontal factor, and disparity and masks use nearest.
+        for key in DISPARITY_KEYS + MASK_KEYS:
+            if batch.get(key) is None:
+                continue
+            resized = F.interpolate(batch[key], size=(new_height, new_width), mode="nearest")
+            out[key] = resized * (new_width / width) if key in DISPARITY_KEYS else resized
         if out.get("valid_mask") is not None:
             # Resampling a 0/1 mask bilinearly blurs its edge; re-binarise so a
             # padded row never counts as partially real.

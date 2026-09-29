@@ -36,6 +36,12 @@ from torch.utils.data import Dataset
 #: Keys that may appear in a benchmark sample and must never appear in a training one.
 GROUND_TRUTH_KEYS = ("disparity_gt", "depth_gt", "valid_gt_mask", "disparity_gt_right", "nonocc_mask")
 
+#: Ground-truth keys that are a LENGTH in pixels, so resizing must rescale their
+#: values, not merely resample them.
+DISPARITY_KEYS = ("disparity_gt", "disparity_gt_right")
+#: Ground-truth keys that are 0/1 and must be resampled with nearest neighbour.
+MASK_KEYS = ("valid_gt_mask", "nonocc_mask")
+
 
 class DatasetMode(str, Enum):
     TRAIN = "train"
@@ -76,8 +82,15 @@ class StereoDataset(Dataset):
         name: dataset name recorded in the metadata.
     """
 
-    def __init__(self, mode: DatasetMode = DatasetMode.TRAIN, transform=None, name: str = "stereo"):
+    def __init__(self, mode: DatasetMode = DatasetMode.TRAIN, transform=None, name: str = "stereo",
+                 with_labels: bool = False):
         self.mode = DatasetMode(mode)
+        #: Load ground truth in TRAIN/VALIDATION mode too, for supervised
+        #: training. Labels then go through the transform with the images, so
+        #: they stay aligned. Datasets without labels simply have none, and a
+        #: sample without them carries an all-zero ``valid_gt_mask``, which makes
+        #: the supervised losses ignore it with no branching anywhere.
+        self.with_labels = bool(with_labels)
         self.transform = transform
         self.name = name
         if self.mode is DatasetMode.BENCHMARK and transform is not None:
@@ -106,24 +119,42 @@ class StereoDataset(Dataset):
         left, right = self._load_images(index)
         sample: Dict[str, Any] = {"left": left, "right": right}
 
+        # Labels are added BEFORE the transform so they are resized and augmented
+        # with the images and stay aligned. BENCHMARK keeps its identity
+        # transform, so there it makes no difference.
+        wants_labels = self.mode is DatasetMode.BENCHMARK or self.with_labels
+        if wants_labels:
+            for key, value in self._ground_truth_or_empty(index).items():
+                if key not in GROUND_TRUTH_KEYS:
+                    raise RuntimeError(f"{type(self).__name__} returned unexpected ground-truth key {key!r}")
+                sample[key] = value
+
         if self.transform is not None:
             sample = self.transform(sample)
 
         sample = {key: _to_chw_tensor(value) for key, value in sample.items()}
-        metadata = {"dataset": self.name, "index": int(index)}
-        metadata.update(self._sample_metadata(index))
-
-        if self.mode is DatasetMode.BENCHMARK:
-            ground_truth = self._load_ground_truth(index)
-            for key, value in ground_truth.items():
-                if key not in GROUND_TRUTH_KEYS:
-                    raise RuntimeError(f"{type(self).__name__} returned unexpected ground-truth key {key!r}")
-                sample[key] = _to_chw_tensor(value)
-        else:
+        if self.with_labels and "disparity_gt" in sample and "valid_gt_mask" not in sample:
+            sample["valid_gt_mask"] = (sample["disparity_gt"] > 0).float()
+        if not wants_labels:
             assert_label_free(sample, context=f"{self.name} sample (mode={self.mode.value})")
 
-        sample["metadata"] = metadata
+        sample["metadata"] = {"dataset": self.name, "index": int(index),
+                              **self._sample_metadata(index)}
         return sample
+
+    def _ground_truth_or_empty(self, index: int) -> Dict[str, Any]:
+        """Ground truth, or ``{}`` for a dataset that has none.
+
+        BENCHMARK still demands labels -- a benchmark without them is a silent
+        no-op -- but supervised training deliberately mixes labelled and
+        unlabelled datasets, so there a missing label is expected, not an error.
+        """
+        try:
+            return self._load_ground_truth(index)
+        except (NotImplementedError, FileNotFoundError):
+            if self.mode is DatasetMode.BENCHMARK:
+                raise
+            return {}
 
 
 def _to_chw_tensor(array) -> torch.Tensor:
@@ -150,7 +181,13 @@ def collate_samples(samples: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     to read back during evaluation.
     """
     batch: Dict[str, Any] = {}
-    tensor_keys = [key for key in samples[0] if key != "metadata"]
+    # Union, not samples[0]'s keys: a supervised batch mixes labelled and
+    # unlabelled datasets, so ground-truth keys are present on only some samples.
+    # The ones without get zeros, and their all-zero valid_gt_mask is what makes
+    # the supervised losses skip them.
+    tensor_keys = []
+    for sample in samples:
+        tensor_keys.extend(k for k in sample if k != "metadata" and k not in tensor_keys)
 
     # With an aspect-preserving resize the samples share a width but not a
     # height, so they are padded to the batch maximum before stacking. The
@@ -162,7 +199,9 @@ def collate_samples(samples: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     ragged = bool(heights) and min(heights) != pad_to
 
     for key in tensor_keys:
-        values = [sample[key] for sample in samples]
+        reference = next(s[key] for s in samples if key in s)
+        values = [sample.get(key) if key in sample else torch.zeros_like(reference)
+                  for sample in samples]
         if ragged:
             values = [F.pad(value, (0, 0, 0, pad_to - value.shape[-2]), mode="replicate")
                       if value.shape[-2] < pad_to else value for value in values]

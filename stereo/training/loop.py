@@ -28,6 +28,7 @@ import torch.nn as nn
 from ..config import Config
 from ..data import (BatchGeometricAugment, DatasetMode, assert_label_free, build_loader,
                     build_training_datasets)
+from ..losses import labels_from_batch
 from ..model import StereoNet
 from ..utils.checkpoint import save_checkpoint, load_checkpoint
 from ..utils.seed import set_seed
@@ -93,7 +94,7 @@ class Trainer:
             self.model.load_state_dict(payload["model"])
             print(f"initialised from {config.training.init_checkpoint}")
 
-        self.objective = LabelFreeObjective(config.loss)
+        self.objective = LabelFreeObjective(config.loss, downsample=config.model.downsample)
         self.geometric_augment = BatchGeometricAugment(config.data.geometric_augmentation,
                                                        seed=config.training.seed)
 
@@ -126,10 +127,13 @@ class Trainer:
 
     def _build_loaders(self):
         cfg = self.config
+        supervised = cfg.loss.uses_labels
         train_dataset, weights, summary = build_training_datasets(
             cfg.data.train, DatasetMode.TRAIN, cfg.data.resize,
-            cfg.data.photometric_augmentation, seed=cfg.training.seed)
-        print("training datasets (images only, no labels):")
+            cfg.data.photometric_augmentation, seed=cfg.training.seed,
+            with_labels=supervised)
+        print("training datasets (labels used where a dataset has them):"
+              if supervised else "training datasets (images only, no labels):")
         for entry in summary:
             print(f"  {entry['name']:12s} n={entry['size']:7d} weight={entry['weight']} root={entry['root']}")
 
@@ -142,8 +146,8 @@ class Trainer:
         if cfg.data.validation:
             val_dataset, val_weights, val_summary = build_training_datasets(
                 cfg.data.validation, DatasetMode.VALIDATION, cfg.data.resize, None,
-                seed=cfg.training.seed + 1)
-            print("label-free validation datasets (images only):")
+                seed=cfg.training.seed + 1, with_labels=supervised)
+            print("validation datasets:")
             for entry in val_summary:
                 print(f"  {entry['name']:12s} n={entry['size']:7d} root={entry['root']}")
             val_loader = build_loader(val_dataset, cfg.training.batch_size, shuffle=False,
@@ -206,7 +210,9 @@ class Trainer:
         -- weak augmentation -- and the student the jittered one; both share the
         *same* geometry, so no disparity rescaling is needed between them.
         """
-        assert_label_free(batch, context="training batch")
+        if not self.config.loss.uses_labels:
+            # Still enforced when the objective claims to be label-free.
+            assert_label_free(batch, context="label-free training batch")
 
         moved = {key: value.to(self.device, non_blocking=True)
                  for key, value in batch.items() if torch.is_tensor(value)}
@@ -222,6 +228,7 @@ class Trainer:
             "clean_left": clean_left,
             "clean_right": clean_right,
             "valid_mask": moved.get("valid_mask"),
+            "labels": labels_from_batch(moved),
             "metadata": moved["metadata"],
         }
 
@@ -251,7 +258,8 @@ class Trainer:
                 result = self.objective(student_outputs,
                                         {"left": views["clean_left"], "right": views["clean_right"]},
                                         state, max_disparity=self.model.max_disparity,
-                                        valid_mask=views.get("valid_mask"))
+                                        valid_mask=views.get("valid_mask"),
+                                        labels=views.get("labels"))
                 loss = result["loss"]
 
             self.optimizer.zero_grad(set_to_none=True)
@@ -292,7 +300,8 @@ class Trainer:
             state = ObjectiveState(iteration=self.iteration, epoch=epoch, warmup_scale=1.0)
             result = self.objective(outputs, {"left": views["clean_left"], "right": views["clean_right"]},
                                     state, max_disparity=self.model.max_disparity,
-                                    valid_mask=views.get("valid_mask"))
+                                    valid_mask=views.get("valid_mask"),
+                                    labels=views.get("labels"))
             for key, value in result["logs"].items():
                 totals[key] = totals.get(key, 0.0) + value
             count += 1

@@ -42,15 +42,15 @@ def test_objective_runs_without_a_teacher_and_logs_the_expected_keys():
         assert key in result["logs"], key
 
 
-def test_objective_requires_no_ground_truth_argument():
-    """The objective's signature has nowhere to put a label."""
+def test_the_objective_has_exactly_one_ground_truth_entry_point():
+    """Ground truth reaches the objective through `labels` and nowhere else."""
     import inspect
     parameters = set(inspect.signature(LabelFreeObjective.__call__).parameters)
-    # valid_mask -- which rows of a ragged, aspect-preserving batch are real
-    # image and which are padding. Derived from image SHAPES, never from
-    # disparity. Any further parameter must be justified the same way.
+    # labels is the ONE route by which ground truth enters, and it does nothing
+    # unless loss.supervised or loss.nsce is non-zero -- pinned by
+    # test_zero_supervised_weights_make_labels_bit_irrelevant.
     assert parameters == {"self", "student_outputs", "images", "state",
-                          "max_disparity", "valid_mask"}
+                          "max_disparity", "valid_mask", "labels"}
 
 
 # --------------------------------------------------------------------------- #

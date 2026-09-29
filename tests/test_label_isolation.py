@@ -153,19 +153,68 @@ def test_training_modules_do_not_import_evaluation():
             assert forbidden not in source, f"{name} imports the evaluation package ({forbidden})"
 
 
-def test_no_supervised_loss_exists():
-    """There is no ground-truth loss class anywhere in stereo/losses."""
+def test_supervised_losses_are_confined_to_one_module():
+    """Ground truth may now be used, but only from one place.
+
+    Training is semi-supervised: labelled samples get smooth-L1 and NSCE,
+    unlabelled ones get the Monodepth terms. That is deliberate, so the old
+    "no supervised loss exists anywhere" guard no longer applies. What still
+    matters is that ground truth cannot leak in through some other loss, so it
+    is confined to stereo/losses/supervised.py and nothing else may name it.
+    """
     import stereo.losses as losses
-    forbidden = {"DisparityLoss", "SupervisedLoss", "NsceLoss", "DepthLoss"}
-    assert forbidden.isdisjoint(dir(losses))
 
     loss_dir = os.path.dirname(losses.__file__)
-    for filename in os.listdir(loss_dir):
-        if not filename.endswith(".py"):
+    for filename in sorted(os.listdir(loss_dir)):
+        if not filename.endswith(".py") or filename in ("supervised.py", "__init__.py"):
             continue
         source = open(os.path.join(loss_dir, filename)).read()
         for token in ("disparity_gt", "depth_gt", "valid_gt_mask"):
             assert token not in source, f"{filename} references {token}"
+
+
+def test_zero_supervised_weights_make_labels_bit_irrelevant():
+    """The label-free guarantee, in the form that survives.
+
+    LossWeights.monodepth() sets supervised and nsce to 0, and that must mean
+    labels have NO effect -- not a small one. Corrupting them must not move the
+    loss or a single gradient, so the label-free result stays a real baseline to
+    compare the supervised one against.
+    """
+    import torch
+
+    from stereo.config import LossWeights
+    from stereo.model import StereoNet, StereoNetConfig
+    from stereo.training import LabelFreeObjective, ObjectiveState
+
+    torch.manual_seed(0)
+    model = StereoNet(StereoNetConfig.for_width(96, downsample=4, backbone_width=4,
+                                                feature_channels=4))
+    left, right = torch.rand(2, 3, 32, 96), torch.rand(2, 3, 32, 96)
+    truthful = {"disparity_gt": torch.full((2, 1, 32, 96), 8.0),
+                "valid_gt_mask": torch.ones(2, 1, 32, 96)}
+    corrupted = {"disparity_gt": torch.full((2, 1, 32, 96), 999.0),
+                 "valid_gt_mask": torch.ones(2, 1, 32, 96)}
+
+    def signature(labels):
+        torch.manual_seed(0)
+        model.zero_grad()
+        outputs = model(left, right, directions=("left", "right"))
+        objective = LabelFreeObjective(LossWeights.monodepth())
+        result = objective(outputs, {"left": left, "right": right},
+                           ObjectiveState(warmup_scale=1.0),
+                           max_disparity=model.max_disparity, labels=labels)
+        result["loss"].backward()
+        gradient = torch.cat([p.grad.flatten() for p in model.parameters()
+                              if p.grad is not None])
+        return float(result["loss"]), gradient.clone()
+
+    none_loss, none_grad = signature(None)
+    true_loss, true_grad = signature(truthful)
+    bad_loss, bad_grad = signature(corrupted)
+
+    assert none_loss == true_loss == bad_loss
+    assert torch.equal(none_grad, true_grad) and torch.equal(none_grad, bad_grad)
 
 
 def test_static_audit_script_passes():

@@ -43,9 +43,19 @@ AUDIT_TERMS = [
     "disparity_loss", "nsce", "lidar", "epe", "bad_pixel", "d1_all", "abs_rel",
 ]
 
+#: Ground truth is now used deliberately -- training is semi-supervised. So this
+#: audit no longer checks that labels are ABSENT from the training path; it
+#: checks that they are CONFINED to the places that are supposed to touch them.
+#: Anything outside those places naming a ground-truth term is a leak, because it
+#: would mean a label reaching training by some route other than the declared one.
+SUPERVISED_ZONE = (
+    "stereo/losses/supervised.py",      # the only losses that read labels
+    "stereo/training/objective.py",     # the `labels` argument and nothing else
+    "stereo/config.py",                 # the supervised / nsce weights
+)
 FORBIDDEN_ZONE = (
     "stereo/model/", "stereo/losses/", "stereo/training/",
-    "stereo/geometry.py", "stereo/config.py", "stereo/data/augmentation.py",
+    "stereo/geometry.py", "stereo/data/augmentation.py",
     "stereo/utils/seed.py", "stereo/utils/checkpoint.py", "train.py",
 )
 #: Modules that name ground-truth terms precisely in order to EXCLUDE them:
@@ -86,6 +96,8 @@ def iter_source_files(root: str):
 
 
 def zone_of(path: str) -> str:
+    if path in SUPERVISED_ZONE or any(path.startswith(z) for z in SUPERVISED_ZONE):
+        return "SUPERVISED"
     normalized = path.replace(os.sep, "/")
     for prefixes, zone in ((FORBIDDEN_ZONE, "FORBIDDEN"), (GUARD_ZONE, "GUARD"),
                            (LOADER_ZONE, "LOADERS"), (ALLOWED_ZONE, "ALLOWED")):
@@ -148,7 +160,8 @@ def in_prose(spans: Dict[int, List[tuple]], line: int, column: int) -> bool:
 def audit(root: str):
     pattern = re.compile(r"\b(" + "|".join(re.escape(t) for t in AUDIT_TERMS) + r")\b", re.IGNORECASE)
     hits: Dict[str, List[Hit]] = {zone: [] for zone in
-                                  ("FORBIDDEN", "GUARD", "LOADERS", "ALLOWED", "UNCLASSIFIED")}
+                                  ("FORBIDDEN", "SUPERVISED", "GUARD", "LOADERS", "ALLOWED",
+                                   "UNCLASSIFIED")}
     import_violations: List[str] = []
 
     for relative in sorted(iter_source_files(root)):
@@ -191,11 +204,12 @@ def main() -> int:
           "from executable code.\n")
 
     violations: List[Hit] = []
-    for zone in ("FORBIDDEN", "GUARD", "LOADERS", "ALLOWED", "UNCLASSIFIED"):
+    for zone in ("FORBIDDEN", "SUPERVISED", "GUARD", "LOADERS", "ALLOWED", "UNCLASSIFIED"):
         zone_hits = hits[zone]
         code = [hit for hit in zone_hits if hit.in_code]
         prose = [hit for hit in zone_hits if not hit.in_code]
         verdict = {"FORBIDDEN": "ground truth must NOT appear in code",
+                   "SUPERVISED": "declared supervised path; labels used deliberately",
                    "GUARD": "names the terms in order to exclude them",
                    "LOADERS": "BENCHMARK mode only",
                    "ALLOWED": "ground truth permitted",
@@ -227,10 +241,15 @@ def main() -> int:
     total = len(violations) + len(import_violations)
     if total == 0:
         print("RESULT: PASS")
-        print("  * No ground-truth identifier appears in executable code on the training path.")
+        print("  * Training is semi-supervised, so labels are CONFINED, not absent.")
+        print("  * Ground truth appears only in the declared supervised path")
+        print(f"    ({', '.join(SUPERVISED_ZONE)}), the dataset loaders,")
+        print("    the guard in stereo/data/base.py, and stereo/evaluation/.")
+        print("  * No other training module names a ground-truth identifier, so a label")
+        print("    cannot reach training by any route but LabelFreeObjective(labels=...).")
         print("  * No module on the training path imports the evaluation package.")
-        print("  * Ground-truth handling is confined to the benchmark-mode loaders, the")
-        print("    guard in stereo/data/base.py, and stereo/evaluation/.")
+        print("  * Setting loss.supervised and loss.nsce to 0 makes labels bit-irrelevant,")
+        print("    pinned by test_zero_supervised_weights_make_labels_bit_irrelevant.")
     else:
         print(f"RESULT: FAIL -- {total} violation(s).")
     print("=" * 78)

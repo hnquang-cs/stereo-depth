@@ -1,0 +1,134 @@
+"""Semi-supervised training: labelled and unlabelled samples in one batch.
+
+KITTI odometry has no disparity; FlyingThings3D and Middlebury do. Rather than
+choose, the loss adapts per sample -- the supervised terms are masked means over
+labelled pixels, so an unlabelled sample carries an all-zero mask and
+contributes nothing to them while still contributing to the Monodepth terms.
+"""
+
+import numpy as np
+import pytest
+import torch
+
+from stereo.config import LossWeights
+from stereo.data.base import collate_samples
+from stereo.losses import DisparityLoss, NsceLoss, labels_from_batch
+from stereo.model import StereoNet, StereoNetConfig
+from stereo.training import LabelFreeObjective, ObjectiveState
+
+
+def _sample(labelled, height=32, width=64, disparity=8.0):
+    sample = {"left": torch.rand(3, height, width), "right": torch.rand(3, height, width),
+              "metadata": {}}
+    if labelled:
+        sample["disparity_gt"] = torch.full((1, height, width), disparity)
+        sample["valid_gt_mask"] = torch.ones(1, height, width)
+    return sample
+
+
+# -- the losses ------------------------------------------------------------- #
+
+def test_supervised_loss_ignores_unlabelled_samples():
+    loss = DisparityLoss()
+    predicted = torch.full((2, 1, 16, 32), 10.0)
+    target = torch.full((2, 1, 16, 32), 14.0)
+    mask = torch.ones_like(target)
+    mask[1] = 0.0                                    # sample 1 has no label
+
+    terms = loss(predicted, target, mask)
+    assert float(terms["epe"]) == pytest.approx(4.0)
+    # A masked MEAN, so the unlabelled half must not dilute it towards zero.
+    assert float(loss(predicted, target, torch.ones_like(mask))["epe"]) == pytest.approx(4.0)
+    assert float(loss(predicted, target, torch.zeros_like(mask))["loss"]) == 0.0
+
+
+def test_nsce_target_peaks_at_the_true_disparity():
+    """The whole point of NSCE: the cost volume is pushed to a single peak in the
+    right bin, which the soft-argmin gradient alone cannot express."""
+    loss = NsceLoss()
+    bins, downsample = 16, 4
+    target = torch.full((1, 1, 8, 8), 5.0 * downsample)    # bin 5
+    mask = torch.ones_like(target)
+
+    right = torch.full((1, bins, 8, 8), 10.0)
+    right[:, 5] = 0.0                                       # peaked at the truth
+    wrong = torch.full((1, bins, 8, 8), 10.0)
+    wrong[:, 12] = 0.0                                      # peaked elsewhere
+    flat = torch.zeros(1, bins, 8, 8)
+
+    scores = {name: float(loss(volume, target, mask, downsample)["loss"])
+              for name, volume in (("right", right), ("flat", flat), ("wrong", wrong))}
+    assert scores["right"] < scores["flat"] < scores["wrong"], scores
+
+
+def test_nsce_skips_disparities_outside_the_search_range():
+    """Outside the range the Laplacian is truncated and the target is a fiction."""
+    loss = NsceLoss()
+    cost = torch.rand(1, 8, 4, 4)
+    beyond = torch.full((1, 1, 4, 4), 500.0)
+    terms = loss(cost, beyond, torch.ones_like(beyond), 4)
+    assert float(terms["in_range_ratio"]) == 0.0
+    assert float(terms["loss"]) == 0.0
+
+
+# -- the data path ---------------------------------------------------------- #
+
+def test_resizing_rescales_disparity_because_it_is_a_length():
+    """The trap: cv2.resize resamples but does not rescale. A 100 px disparity at
+    width 1242 is 51.5 px at width 640, and getting this wrong trains the model
+    against a target that is silently ~2x too large."""
+    from stereo.data.augmentation import ResizeConfig, ResizeSample
+
+    resize = ResizeSample(ResizeConfig(width=640, preserve_aspect=True))
+    out = resize({"left": np.zeros((375, 1242, 3), np.float32),
+                  "right": np.zeros((375, 1242, 3), np.float32),
+                  "disparity_gt": np.full((375, 1242), 100.0, np.float32),
+                  "valid_gt_mask": np.ones((375, 1242), np.float32)})
+    assert out["disparity_gt"].mean() == pytest.approx(100.0 * 640 / 1242, rel=1e-3)
+    assert out["valid_gt_mask"].shape == out["disparity_gt"].shape
+
+
+def test_a_batch_may_mix_labelled_and_unlabelled_samples():
+    batch = collate_samples([_sample(True), _sample(False), _sample(True)])
+    assert "disparity_gt" in batch
+    assert [float(batch["valid_gt_mask"][i].mean()) for i in range(3)] == [1.0, 0.0, 1.0]
+
+    assert labels_from_batch(collate_samples([_sample(False)])) is None
+    assert labels_from_batch(batch) is not None
+
+
+# -- end to end ------------------------------------------------------------- #
+
+def _objective_run(weights, labels):
+    torch.manual_seed(0)
+    model = StereoNet(StereoNetConfig.for_width(96, downsample=4, backbone_width=4,
+                                                feature_channels=4))
+    left, right = torch.rand(2, 3, 32, 96), torch.rand(2, 3, 32, 96)
+    outputs = model(left, right, directions=("left", "right"))
+    return LabelFreeObjective(weights)(outputs, {"left": left, "right": right},
+                                       ObjectiveState(warmup_scale=1.0),
+                                       max_disparity=model.max_disparity, labels=labels)
+
+
+def test_the_objective_reports_supervised_terms_only_when_labels_are_present():
+    labels = {"disparity_gt": torch.full((2, 1, 32, 96), 6.0),
+              "valid_gt_mask": torch.ones(2, 1, 32, 96)}
+    supervised = _objective_run(LossWeights(), labels)["logs"]
+    for key in ("supervised", "epe", "nsce", "labelled_ratio"):
+        assert key in supervised, key
+
+    unlabelled = _objective_run(LossWeights(), None)["logs"]
+    for key in ("supervised", "epe", "nsce"):
+        assert key not in unlabelled, f"{key} reported without labels"
+    # The Monodepth terms apply to every sample, labelled or not -- which is how
+    # an unlabelled dataset such as KITTI odometry still trains the model.
+    for key in ("photometric", "smoothness", "left_right"):
+        assert key in unlabelled, key
+
+
+def test_an_all_unlabelled_batch_contributes_nothing_supervised():
+    labels = {"disparity_gt": torch.zeros(2, 1, 32, 96),
+              "valid_gt_mask": torch.zeros(2, 1, 32, 96)}
+    logs = _objective_run(LossWeights(), labels)["logs"]
+    assert float(logs["labelled_ratio"]) == 0.0
+    assert float(logs["supervised"]) == 0.0

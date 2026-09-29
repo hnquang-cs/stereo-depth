@@ -35,7 +35,7 @@ import torch.nn.functional as F
 
 from ..config import LossWeights
 from ..geometry import RESIZE_ALIGN_CORNERS
-from ..losses import (ConfidenceLoss, LeftRightConsistencyLoss, PhotometricLoss,SmoothnessLoss, )
+from ..losses import (ConfidenceLoss, DisparityLoss, NsceLoss, LeftRightConsistencyLoss, PhotometricLoss,SmoothnessLoss, )
 
 @dataclass
 class ObjectiveState:
@@ -49,14 +49,18 @@ class LabelFreeObjective:
     """Computes the total loss and the log dictionary for one batch."""
 
     def __init__(self, weights: LossWeights,
+                 downsample: int = 4,
                  lr_occlusion_threshold: float = 1.0,
                  photometric_reliability_threshold: float = 0.15):
         self.weights = weights
+        self.downsample = downsample
         self.photometric_reliability_threshold = photometric_reliability_threshold
         self.photometric = PhotometricLoss()
         self.smoothness = SmoothnessLoss(normalize=True)
         self.consistency = LeftRightConsistencyLoss()
         self.confidence = ConfidenceLoss()
+        self.disparity_loss = DisparityLoss()
+        self.nsce = NsceLoss()
         self.lr_occlusion_threshold = lr_occlusion_threshold
 
     # -- individual terms --------------------------------------------------- #
@@ -88,7 +92,8 @@ class LabelFreeObjective:
                  images: Dict[str, torch.Tensor],
                  state: ObjectiveState,
                  max_disparity: float = 1e9,
-                 valid_mask: Optional[torch.Tensor] = None) -> Dict[str, Any]:
+                 valid_mask: Optional[torch.Tensor] = None,
+                 labels: Optional[Dict[str, torch.Tensor]] = None) -> Dict[str, Any]:
         """Args:
             student_outputs: ``{"left": {...}, "right": {...}}`` from the student.
             images: ``{"left", "right"}`` -- the **clean** (un-jittered) pair,
@@ -96,6 +101,9 @@ class LabelFreeObjective:
             state: schedule values for this iteration.
             max_disparity: model's search-range bound, used to reject
                 out-of-range predictions.
+            labels: ``{"disparity_gt", "valid_gt_mask"}`` when any sample in the
+                batch carries a label. Samples without one have an all-zero mask,
+                so the supervised terms ignore them and no branching is needed.
             valid_mask: ``(B, 1, H, W)``, 1 on real pixels and 0 on the rows the
                 collate padded a ragged (aspect-preserving) batch with. Without
                 it the padded rows are free to match each other perfectly, which
@@ -157,6 +165,26 @@ class LabelFreeObjective:
                 self.weights.photometric * small_photometric + self.weights.smoothness * small_smoothness)
 
         # ---- shape the cost volume from photometric evidence --------------- #
+        # ---- supervised, on whichever samples carry a label ------------------ #
+        if labels is not None and (self.weights.supervised > 0.0 or self.weights.nsce > 0.0):
+            target = labels["disparity_gt"]
+            mask = labels.get("valid_gt_mask")
+            mask = torch.ones_like(target) if mask is None else mask
+            if valid_mask is not None:
+                mask = mask * valid_mask                 # exclude batch padding
+            logs["labelled_ratio"] = float(mask.mean())
+
+            if self.weights.supervised > 0.0:
+                terms = self.disparity_loss(student_outputs["left"]["disparity"], target, mask)
+                total = total + self.weights.supervised * terms["loss"]
+                logs["supervised"] = float(terms["loss"].detach())
+                logs["epe"] = float(terms["epe"])
+            if self.weights.nsce > 0.0 and "cost" in student_outputs["left"]:
+                terms = self.nsce(student_outputs["left"]["cost"], target, mask, self.downsample)
+                total = total + self.weights.nsce * terms["loss"]
+                logs["nsce"] = float(terms["loss"].detach())
+                logs["nsce_in_range"] = float(terms["in_range_ratio"])
+
         # ---- label-free matchability supervision -------------------------- #
         if self.weights.confidence > 0.0 and state.warmup_scale > 0.0:
             reliability = _reliability_target(

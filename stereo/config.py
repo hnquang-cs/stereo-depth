@@ -22,17 +22,17 @@ from .postprocess import PostProcessConfig
 class LossWeights:
     """Weights of the label-free objective.  There is no ground-truth term.
 
-    **The default is the Monodepth objective** (Godard et al. 2017, eq. 2):
-    photometric + left-right + smoothness, and nothing else. That is the
+    **The default is semi-supervised**: the Monodepth terms on every sample, plus
+    smooth-L1 and NSCE on the samples that happen to carry a label. Labelled and
+    unlabelled datasets therefore mix freely in one batch -- KITTI contributes
+    through the photometric terms, FlyingThings3D and Middlebury through both.
+
+    ``LossWeights.monodepth()`` sets ``supervised`` and ``nsce`` to 0 and
+    recovers the label-free objective exactly, which is the baseline to compare
+    against. That is the
     self-supervised half of what this package is: the paper's cost-volume
     architecture (arXiv:2109.11644) trained by Monodepth's self-supervised
     losses.
-
-    The paper's own NSCE term is **absent, not replaced**. NSCE is anchored on
-    ground-truth disparity, so it has no label-free form, and inventing a
-    substitute for it would no longer be a reimplementation of the paper. The
-    cost volume is therefore trained only by the gradient reaching it back
-    through the soft-argmin.
 
     The remaining weights below are auxiliary regularisers, not part of
     Monodepth. They default to 0.0 so the objective is exactly the three
@@ -53,7 +53,17 @@ class LossWeights:
     left_right: float = 1.0         #: a_lr, applied to (left-right error / max_disparity)
     smoothness: float = 0.1         #: a_ds
 
-    # -- not part of it; off unless deliberately enabled -------------------- #
+    # -- supervised, where a sample has a label ----------------------------- #
+    #: Smooth-L1 on the disparity. Applied as a masked mean over labelled pixels,
+    #: so a batch mixing labelled and unlabelled datasets needs no branching: an
+    #: unlabelled sample carries an all-zero mask and contributes nothing.
+    supervised: float = 1.0
+    #: The paper's NSCE term on the cost volume (arXiv:2005.08806, 0.05;
+    #: arXiv:2109.11644, 0.2). It needs ground truth, which is why the label-free
+    #: configuration omits it rather than substituting anything.
+    nsce: float = 0.2
+
+    # -- not part of the Monodepth objective; off unless enabled ------------- #
     #: Label-free matchability target. Not from either paper.
     confidence: float = 0.0
     #: The photometric/smoothness terms repeated on the low-resolution
@@ -62,6 +72,11 @@ class LossWeights:
     low_resolution: float = 0.0
     #: Keeps predictions inside the search range.
     range_penalty: float = 0.0
+
+    @property
+    def uses_labels(self) -> bool:
+        """True when the objective has a term that reads ground truth."""
+        return bool(self.supervised or self.nsce)
 
     @classmethod
     def monodepth(cls) -> "LossWeights":
@@ -98,7 +113,7 @@ class LossWeights:
 
         """
         return cls(photometric=1.0, left_right=1.0, smoothness=0.1,
-                   low_resolution=0.0, confidence=0.0,
+                   supervised=0.0, nsce=0.0, low_resolution=0.0, confidence=0.0,
                    range_penalty=0.0)
 
 

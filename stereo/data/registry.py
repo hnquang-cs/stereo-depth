@@ -54,19 +54,27 @@ class DatasetSpec:
     options: Dict[str, Any] = field(default_factory=dict)
 
 
-def build_dataset(spec: DatasetSpec, mode: DatasetMode, transform=None) -> StereoDataset:
-    """Instantiate one dataset from its spec."""
+def build_dataset(spec: DatasetSpec, mode: DatasetMode, transform=None,
+                  with_labels: bool = False) -> StereoDataset:
+    """Instantiate one dataset from its spec.
+
+    ``with_labels`` asks a TRAIN/VALIDATION dataset to load ground truth as well,
+    for supervised training. Datasets that have none simply return none.
+    """
     if spec.type not in DATASET_TYPES:
         raise ValueError(f"unknown dataset type {spec.type!r}; known types: {sorted(DATASET_TYPES)}")
     dataset_class = DATASET_TYPES[spec.type]
     dataset = dataset_class(root=spec.root, mode=mode, transform=transform, **spec.options)
+    # Set after construction rather than threaded through six loader signatures,
+    # none of which would use it for anything but forwarding.
+    dataset.with_labels = bool(with_labels)
     return dataset
 
 
 def build_training_datasets(specs: Sequence[DatasetSpec], mode: DatasetMode,
                             resize: Optional[ResizeConfig],
                             photometric: Optional[PhotometricAugmentConfig],
-                            seed: int = 0):
+                            seed: int = 0, with_labels: bool = False):
     """Build the enabled datasets plus the per-sample weights for weighted sampling.
 
     Returns ``(concat_dataset, sample_weights, summary)``.  ``sample_weights`` is
@@ -84,7 +92,7 @@ def build_training_datasets(specs: Sequence[DatasetSpec], mode: DatasetMode,
             continue
         transform = build_train_transform(resize, photometric if mode is DatasetMode.TRAIN else None,
                                           seed=seed + index)
-        dataset = build_dataset(spec, mode, transform)
+        dataset = build_dataset(spec, mode, transform, with_labels)
         if spec.fraction < 1.0:
             keep = max(1, int(round(len(dataset) * spec.fraction)))
             dataset = Subset(dataset, range(keep))
