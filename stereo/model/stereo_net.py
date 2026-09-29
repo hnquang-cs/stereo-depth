@@ -59,23 +59,25 @@ class StereoNetConfig:
     #: range. Inference on an image of any other width resizes to this width and
     #: scales the result back (:func:`stereo.model.predict_disparity`).
     canonical_width: int = 640
-    #: ``"correlation"`` (default): the dot product over the feature channel IS
-    #: the cost, read directly by soft-argmin. No parameters in this stage, so
-    #: nothing in it depends on ``num_disparities`` -- one checkpoint serves any
-    #: search range -- and it runs in 1 ms where the alternative takes 470.
-    #: Measured on the real Middlebury pair under the Monodepth objective:
-    #: 3.49 px against 5.27 for ``"conv2d"`` and 5.38 for block matching, with a
-    #: prediction spread of 14.20 against a true 13.9 (``conv2d``: 10.09).
+    #: ``"conv2d"`` (default): the paper's aggregation -- one 3D convolution over
+    #: the correlation volume, then the disparity axis flattened into channels and
+    #: 2D convolutions over it. This is what the 5,661,646-parameter match with
+    #: `mmstereo` is built from. Its cost is that ``num_disparities`` becomes part
+    #: of the weights and parameters grow as ``D**2``.
     #:
-    #: ``"conv2d"`` is the paper's aggregation: one 3D convolution, then the
-    #: disparity axis flattened into channels and 2D convolutions over it. Use it
-    #: to reproduce arXiv:2109.11644 exactly -- it is what the 5,661,646-parameter
-    #: fidelity match is built from. Its cost is that ``num_disparities`` becomes
-    #: part of the weights and parameters grow as ``D**2``.
+    #: ``"correlation"``: no aggregation at all -- the dot product IS the cost,
+    #: read straight by soft-argmin. No parameters in this stage, so nothing in it
+    #: depends on ``num_disparities`` (one checkpoint serves any search range) and
+    #: it runs in 1 ms where the other takes 470.
     #:
-    #: See :class:`~stereo.model.aggregation.CorrelationAggregation` and
-    #: docs/REPORT.md 16j.
-    aggregation: str = "correlation"
+    #: Which is better depends on what supervises the cost volume. Measured under
+    #: the LABEL-FREE objective on the real Middlebury pair, correlation won
+    #: clearly: 3.49 px against 5.27, with a prediction spread of 14.20 against
+    #: 10.09 for a true 13.9. But the learned aggregation had nothing shaping it
+    #: there beyond the gradient surviving the soft-argmin. With NSCE it is
+    #: supervised directly, which is the case it was designed for, so that result
+    #: does not carry over and has not been re-measured. See docs/REPORT.md 16j.
+    aggregation: str = "conv2d"
     #: Restrict the soft-argmin expectation to ``+/- window`` bins around the cost
     #: minimum. ``None``, the reference implementation's full expectation, is the
     #: default **because the restriction did not replicate end to end**: it is a

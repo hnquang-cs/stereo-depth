@@ -122,9 +122,8 @@ def test_checkpoint_roundtrip_rebuilds_the_architecture(tmp_path):
 def test_num_disparities_is_baked_into_the_weights():
     """Documented limitation: the search range is part of the architecture.
 
-    Pinned to aggregation="conv2d": this documents a property of the
-    paper's aggregation, which flattens D into channels. The default
-    "correlation" does not have it, which is one reason it is the default.
+    This is a property of the paper's aggregation, which flattens D into
+    channels; aggregation="correlation" does not have it.
     """
     narrow = StereoNet(small_config(224, aggregation="conv2d"))
     wide = StereoNet(small_config(1024, aggregation="conv2d"))
@@ -132,9 +131,10 @@ def test_num_disparities_is_baked_into_the_weights():
     with pytest.raises(RuntimeError):
         wide.load_state_dict(narrow.state_dict())
 
-    # The default aggregation does not have this limitation.
-    a = StereoNet(small_config(224))
-    b = StereoNet(small_config(1024))
+    # aggregation="correlation" does not have this limitation: nothing in that
+    # stage has a shape depending on D, so one checkpoint serves any range.
+    a = StereoNet(small_config(224, aggregation="correlation"))
+    b = StereoNet(small_config(1024, aggregation="correlation"))
     assert a.num_disparities != b.num_disparities
     b.load_state_dict(a.state_dict())
 
