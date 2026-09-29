@@ -176,7 +176,17 @@ class LabelFreeObjective:
 
             if self.weights.supervised > 0.0:
                 terms = self.disparity_loss(student_outputs["left"]["disparity"], target, mask)
-                total = total + self.weights.supervised * terms["loss"]
+                # Normalised by the search range before weighting, exactly as
+                # left_right and range_penalty are. Smooth-L1 is a PIXEL quantity
+                # and the photometric term is an image residual in [0, 1], so
+                # weighting them against each other directly compares numbers two
+                # orders of magnitude apart: measured at width 320, an unnormalised
+                # smooth-L1 was 99% of the objective and the photometric term got
+                # so little gradient that its SSIM did not move at all.
+                # Normalising also makes the weight independent of TRAIN_WIDTH and
+                # DISPARITY_RANGE, so changing either does not silently rebalance
+                # the objective.
+                total = total + self.weights.supervised * terms["loss"] / max(max_disparity, 1.0)
                 logs["supervised"] = float(terms["loss"].detach())
                 logs["epe"] = float(terms["epe"])
             if self.weights.nsce > 0.0 and "cost" in student_outputs["left"]:

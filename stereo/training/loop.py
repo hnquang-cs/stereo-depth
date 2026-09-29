@@ -500,6 +500,14 @@ class Trainer:
                  f"(ssim {logs['photometric_ssim']:.3f} l1 {logs['photometric_l1']:.3f})",
                  f"smooth {logs['smoothness']:.4f}",
                  f"lr_cons {logs['left_right']:.4f}"]
+        # The supervised terms dominate the total when they are on, so they are
+        # shown next to it rather than left to be inferred from the difference.
+        if "supervised" in logs:
+            parts.append(f"sL1 {logs['supervised']:.3f}(epe {logs['epe']:.2f})")
+        if "nsce" in logs:
+            parts.append(f"nsce {logs['nsce']:.2f}")
+        if "labelled_ratio" in logs:
+            parts.append(f"lab {logs['labelled_ratio']:.2f}")
         if "mean_confidence" in logs:
             parts.append(f"conf {logs['mean_confidence']:.3f}")
         parts.append(f"d[{logs['disparity_min']:.1f},{logs['disparity_max']:.1f}] "
@@ -514,6 +522,10 @@ class Trainer:
         parts = [f"epoch {epoch:3d}",
                  f"train_loss {train_logs['total']:.4f}",
                  f"photo {train_logs['photometric']:.4f}"]
+        if "supervised" in train_logs:
+            parts.append(f"sL1 {train_logs['supervised']:.3f}(epe {train_logs['epe']:.2f})")
+        if "nsce" in train_logs:
+            parts.append(f"nsce {train_logs['nsce']:.2f}")
         parts.append(f"lr_cons {train_logs['left_right']:.4f}(w={self.config.loss.left_right:g})")
         parts.append(f"{train_logs['seconds']:.0f}s")
         line = "  ".join(parts)

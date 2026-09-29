@@ -74,6 +74,14 @@ ALLOWED_ZONE = (
     "evaluate.py", "inference.py", "tests/", "scripts/", "docs/", "configs/", "notebooks/",
 )
 
+#: Reading a metric out of a logs dict is not reading a label -- the value was
+#: already computed inside the objective, which is in the supervised zone. The
+#: training loop prints these, so the pattern is exempted narrowly (a dict lookup
+#: or membership test keyed by the metric name) rather than by exempting the file.
+LOG_ACCESS = re.compile(
+    r"""(?:logs|train_logs|val_logs|averages)(?:\.get)?\s*[\[(]\s*["'](\w+)["']"""
+    r"""|["'](\w+)["']\s+in\s+(?:logs|train_logs|val_logs|averages)""")
+
 FORBIDDEN_IMPORTS = ("from ..evaluation", "from stereo.evaluation", "import stereo.evaluation",
                      "from .evaluation import")
 
@@ -87,7 +95,8 @@ class Hit(NamedTuple):
 
 
 def iter_source_files(root: str):
-    skip = {".git", "__pycache__", "outputs", "datasets", ".pytest_cache", "venv", ".ipynb_checkpoints"}
+    skip = {".git", "__pycache__", "outputs", "datasets", ".pytest_cache", "venv", ".venv",
+            "env", ".env", "site-packages", ".ipynb_checkpoints", "node_modules"}
     for directory, subdirs, filenames in os.walk(root):
         subdirs[:] = [d for d in subdirs if d not in skip]
         for filename in filenames:
@@ -172,7 +181,13 @@ def audit(root: str):
         spans = prose_spans(source) if relative.endswith(".py") else {}
 
         for number, line in enumerate(source.splitlines(), start=1):
+            # A metric read out of a logs dict is not a label read: the value was
+            # computed inside the objective, which is in the supervised zone, and
+            # the training loop only prints it.
+            log_only = zone == "FORBIDDEN" and LOG_ACCESS.search(line) is not None
             for match in pattern.finditer(line):
+                if log_only:
+                    continue
                 if relative.endswith(".py"):
                     prose = in_prose(spans, number, match.start())
                 else:
