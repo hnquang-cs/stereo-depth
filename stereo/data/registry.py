@@ -119,7 +119,8 @@ def build_training_datasets(specs: Sequence[DatasetSpec], mode: DatasetMode,
 
 def build_loader(dataset, batch_size: int, shuffle: bool = False, num_workers: int = 4,
                  sample_weights: Optional[torch.Tensor] = None, samples_per_epoch: Optional[int] = None,
-                 seed: int = 0, drop_last: bool = True) -> DataLoader:
+                 seed: int = 0, drop_last: bool = True, persistent: bool = True,
+                 pin: Optional[bool] = None) -> DataLoader:
     """Data loader using :func:`~stereo.data.base.collate_samples`."""
     generator = torch.Generator()
     generator.manual_seed(seed)
@@ -137,10 +138,11 @@ def build_loader(dataset, batch_size: int, shuffle: bool = False, num_workers: i
     # prefetch_factor deepens the queue so a slow sample does not stall the GPU.
     extra = {}
     if num_workers > 0:
-        extra = {"persistent_workers": True, "prefetch_factor": 4}
+        extra = {"persistent_workers": persistent, "prefetch_factor": 4}
+    pin_memory = torch.cuda.is_available() if pin is None else pin
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, sampler=sampler,
                       num_workers=num_workers, collate_fn=collate_samples, drop_last=drop_last,
-                      pin_memory=torch.cuda.is_available(), generator=generator, **extra)
+                      pin_memory=pin_memory, generator=generator, **extra)
 
 
 def build_benchmark_dataset(spec: DatasetSpec) -> StereoDataset:

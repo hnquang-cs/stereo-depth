@@ -150,10 +150,15 @@ class Trainer:
             print("validation datasets:")
             for entry in val_summary:
                 print(f"  {entry['name']:12s} n={entry['size']:7d} root={entry['root']}")
+            # Validation runs for max_validation_steps batches once an epoch, so
+            # its loader does not need the training loader's worker pool. Keeping
+            # them persistent doubled the number of live worker processes -- at
+            # NUM_WORKERS=8 that is 16, each holding a pinned prefetch queue, alive
+            # for the whole run to serve a brief pass.
             val_loader = build_loader(val_dataset, cfg.training.batch_size, shuffle=False,
-                                      num_workers=cfg.training.num_workers,
+                                      num_workers=min(cfg.training.num_workers, 2),
                                       sample_weights=val_weights, seed=cfg.training.seed + 1,
-                                      drop_last=False)
+                                      drop_last=False, persistent=False, pin=False)
         return train_loader, val_loader
 
     def _steps_per_epoch(self) -> int:
