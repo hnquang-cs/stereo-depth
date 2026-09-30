@@ -351,3 +351,44 @@ def test_visualisation_is_one_row_per_sample_with_four_panels(unlabeled_dataset,
     from PIL import Image
     with Image.open(path) as image:
         assert image.width > image.height, "four columns should be wider than tall"
+
+
+def test_visualisation_handles_train_and_val_at_different_heights(unlabeled_dataset, tmp_path):
+    """The figure draws from BOTH loaders, and with an aspect-preserving resize
+    their batches have different heights -- so nothing may assume they stack."""
+    import matplotlib
+    matplotlib.use("Agg")
+
+    from stereo.data.augmentation import (GeometricAugmentConfig, PhotometricAugmentConfig,
+                                          ResizeConfig)
+    from stereo.data.registry import DatasetSpec
+    from stereo.training import Trainer
+
+    tall = tmp_path / "tall"
+    for side in ("left", "right"):
+        (tall / side).mkdir(parents=True)
+    import cv2
+    import numpy as np
+    for index in range(3):
+        image = (np.random.default_rng(index).random((160, 96, 3)) * 255).astype(np.uint8)
+        cv2.imwrite(str(tall / "left" / f"{index}.png"), image)
+        cv2.imwrite(str(tall / "right" / f"{index}.png"), image)
+
+    config = Config()
+    config.model = StereoNetConfig.for_width(96, downsample=4, backbone_width=4, feature_channels=4)
+    config.dynamic_disparity = False
+    # Wide training images, tall validation images: different aspect ratios, so
+    # preserve_aspect gives the two loaders different heights.
+    config.data.train = [DatasetSpec(type="folder", root=unlabeled_dataset)]
+    config.data.validation = [DatasetSpec(type="folder", root=str(tall))]
+    config.data.resize = ResizeConfig(width=96, preserve_aspect=True)
+    config.data.photometric_augmentation = PhotometricAugmentConfig(enabled=False)
+    config.data.geometric_augmentation = GeometricAugmentConfig(enabled=False)
+    config.training.output_dir = str(tmp_path / "out")
+    config.training.num_workers = 0
+    config.training.batch_size = 2
+    config.training.visualize_samples = 2
+
+    trainer = Trainer(config, device=torch.device("cpu"))
+    path = trainer.save_visualization(0)
+    assert path is not None and pathlib.Path(path).exists()

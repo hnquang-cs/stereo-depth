@@ -394,69 +394,90 @@ class Trainer:
 
         from ..geometry import warp_right_to_left
 
-        loader = self.val_loader or self.train_loader
-        try:
-            batch = next(iter(loader))
-        except StopIteration:                            # pragma: no cover
-            return None
+        # Both splits, so the figure shows generalisation and not only fit: rows
+        # from the training loader above rows from the validation loader.
+        sources = [("train", self.train_loader)]
+        if self.val_loader is not None:
+            sources.append(("val", self.val_loader))
 
         was_training = self.model.training
         self.model.eval()
-        views = self._prepare(batch, augment=False)
-        left, right = views["clean_left"], views["clean_right"]
-        with torch.no_grad():
-            outputs = self.model(left, right, directions=("left",))["left"]
-            disparity = outputs["disparity"]
-            warped, valid = warp_right_to_left(right, disparity)
-            residual = ((warped - left).abs().mean(dim=1, keepdim=True) * valid)
-            coarse = torch.nn.functional.interpolate(
-                outputs["disparity_small"], size=disparity.shape[-2:],
-                mode="bilinear", align_corners=False) * self.model.scale
+        blocks = []
+        per_split = max(self.config.training.visualize_samples, 1)
+        for name, loader in sources:
+            try:
+                batch = next(iter(loader))
+            except StopIteration:                        # pragma: no cover
+                continue
+            views = self._prepare(batch, augment=False)
+            take = min(per_split, views["clean_left"].shape[0])
+            left = views["clean_left"][:take]
+            right = views["clean_right"][:take]
+            with torch.no_grad():
+                out = self.model(left, right, directions=("left",))["left"]
+                disparity = out["disparity"]
+                warped, valid = warp_right_to_left(right, disparity)
+                residual = (warped - left).abs().mean(dim=1, keepdim=True) * valid
+                coarse = torch.nn.functional.interpolate(
+                    out["disparity_small"], size=disparity.shape[-2:],
+                    mode="bilinear", align_corners=False) * self.model.scale
+            mask = views.get("valid_mask")
+            blocks.append({"name": name, "left": left, "right": right,
+                           "disparity": disparity, "warped": warped, "valid": valid,
+                           "residual": residual, "coarse": coarse,
+                           "mask": mask[:take] if mask is not None else None})
         if was_training:
             self.model.train()
+        if not blocks:
+            return None
 
         directory = os.path.join(self.config.training.output_dir, "visualizations")
         os.makedirs(directory, exist_ok=True)
         path = os.path.join(directory, f"epoch_{epoch:04d}.png")
 
+        # Flatten the blocks into rows, remembering which split each came from.
+        entries = []
+        for block in blocks:
+            for index in range(block["left"].shape[0]):
+                entries.append((block, index))
+
         # A ragged (aspect-preserving) batch is padded to its tallest member, so
         # each sample is cropped back to its own real rows and given a figure row
-        # sized to its own aspect ratio. Otherwise a 1242x375 KITTI frame batched
-        # beside a 741x500 Middlebury one spends most of its row on padding.
-        padding = views.get("valid_mask")
-        count = max(min(self.config.training.visualize_samples, disparity.shape[0]), 1)
-        height, width = disparity.shape[-2:]
+        # sized to its own aspect ratio.
+        heights = []
+        for block, index in entries:
+            rows_here = block["left"].shape[-2]
+            if block["mask"] is not None:
+                rows_here = max(int(block["mask"][index, 0, :, 0].sum().item()), 1)
+            heights.append(rows_here)
 
-        rows = []
-        for index in range(count):
-            valid_rows = height
-            if padding is not None:
-                column = padding[index, 0, :, 0]
-                valid_rows = max(int(column.sum().item()), 1)
-            rows.append(valid_rows)
-
+        width = entries[0][0]["left"].shape[-1]
         panel_w = 4.6
-        heights = [panel_w * r / max(width, 1) for r in rows]
-        fig = plt.figure(figsize=(4 * panel_w, sum(heights) + 0.75), facecolor="white")
-        grid = fig.add_gridspec(count, 4, height_ratios=heights, wspace=0.03, hspace=0.10)
+        figure_heights = [panel_w * r / max(width, 1) for r in heights]
+        fig = plt.figure(figsize=(4 * panel_w, sum(figure_heights) + 0.75), facecolor="white")
+        grid = fig.add_gridspec(len(entries), 4, height_ratios=figure_heights,
+                                wspace=0.03, hspace=0.12)
 
         columns = ("left", "right", "predicted disparity", "right warped into left")
-        for row in range(count):
-            keep = slice(0, rows[row])
-            valid_here = valid[row][:, keep]
-            residual_here = residual[row][:, keep]
+        seen = {}
+        for row, (block, index) in enumerate(entries):
+            keep = slice(0, heights[row])
+            valid_here = block["valid"][index][:, keep]
+            residual_here = block["residual"][index][:, keep]
             per_pixel = residual_here[valid_here > 0.5]
-            disparity_here = disparity[row][:, keep]
-            images = (to_numpy_image(left[row:row + 1, :, keep]),
-                      to_numpy_image(right[row:row + 1, :, keep]),
+            disparity_here = block["disparity"][index][:, keep]
+            images = (to_numpy_image(block["left"][index:index + 1, :, keep]),
+                      to_numpy_image(block["right"][index:index + 1, :, keep]),
                       colorize(disparity_here),
-                      to_numpy_image(warped[row:row + 1, :, keep]))
+                      to_numpy_image(block["warped"][index:index + 1, :, keep]))
             notes = (None, None,
                      f"{float(disparity_here.min()):.1f} - {float(disparity_here.max()):.1f} px"
                      f"   (range 0-{self.model.max_disparity})",
                      "photometric residual "
                      f"{float(per_pixel.mean()) if per_pixel.numel() else float('nan'):.4f}")
 
+            seen[block["name"]] = seen.get(block["name"], 0) + 1
+            label = f"{block['name']} {seen[block['name']]}"
             for position, (image, note, column) in enumerate(zip(images, notes, columns)):
                 axis = fig.add_subplot(grid[row, position])
                 axis.imshow(image, aspect="auto")
@@ -466,20 +487,33 @@ class Trainer:
                     spine.set_edgecolor("#d9d9d9")
                 if row == 0:
                     axis.set_title(column, fontsize=12, color="#222222", pad=8)
-                if position == 0 and count > 1:
-                    axis.set_ylabel(f"sample {row}", fontsize=10, color="#777777", labelpad=6)
+                if position == 0:
+                    colour = "#1a6fb5" if block["name"] == "train" else "#b5541a"
+                    axis.set_ylabel(label, fontsize=10, color=colour, labelpad=6)
                 if note:
                     axis.text(0.015, 0.04, note, transform=axis.transAxes, fontsize=9,
                               color="white", va="bottom", ha="left",
                               bbox=dict(boxstyle="round,pad=0.32", facecolor="#000000",
                                         alpha=0.58, edgecolor="none"))
 
-        refine = float((disparity - coarse).abs().mean())
+        # Summary statistics are aggregated as SCALARS, not by concatenating the
+        # blocks: with an aspect-preserving resize the train and val batches have
+        # different heights, so they do not stack.
+        def across(key, reduce):
+            return reduce([reduce(block[key]).item() for block in blocks])
+
+        low = min(float(block["disparity"].min()) for block in blocks)
+        high = max(float(block["disparity"].max()) for block in blocks)
+        mean = sum(float(block["disparity"].mean()) for block in blocks) / len(blocks)
+        refine = sum(float((block["disparity"] - block["coarse"]).abs().mean())
+                     for block in blocks) / len(blocks)
+        warp = sum(float(block["valid"].mean()) for block in blocks) / len(blocks)
+        splits = " + ".join(f"{sum(1 for b, _ in entries if b['name'] == name)} {name}"
+                            for name in dict.fromkeys(b["name"] for b in blocks))
         fig.suptitle(
-            f"epoch {epoch}   |   disparity {float(disparity.min()):.1f}-"
-            f"{float(disparity.max()):.1f} px, mean {float(disparity.mean()):.1f}   |   "
-            f"refinement moves it {refine:+.2f} px   |   "
-            f"valid warp {float(valid.mean()) * 100:.0f}%",
+            f"epoch {epoch}   |   {splits}   |   disparity {low:.1f}-{high:.1f} px, "
+            f"mean {mean:.1f}   |   refinement moves it {refine:+.2f} px   |   "
+            f"valid warp {warp * 100:.0f}%",
             fontsize=13, color="#222222", y=0.995)
         fig.savefig(path, dpi=110, bbox_inches="tight", facecolor="white")
         plt.close(fig)
