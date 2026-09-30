@@ -151,6 +151,10 @@ class TrainingConfig:
     #: Label-free validation criterion used for "best" checkpoint selection.
     selection_metric: str = "val/photometric"
     max_steps_per_epoch: Optional[int] = None
+    #: Batches per validation pass. Validation is a label-free proxy used only to
+    #: pick a checkpoint, so it does not need the whole set -- and the notebook
+    #: points it at the training mixture, which would be ~11700 batches an epoch.
+    max_validation_steps: Optional[int] = 200
     #: Save a left/right/disparity figure every N epochs (0 disables).
     visualize_every: int = 5
     #: How many stereo pairs to put in each figure.

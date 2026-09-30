@@ -287,14 +287,26 @@ class Trainer:
         return averages
 
     @torch.no_grad()
+    @torch.no_grad()
     def validate(self, epoch: int) -> Dict[str, float]:
-        """Label-free validation: photometric, consistency and coverage only."""
+        """Validation metrics, used only to choose a checkpoint.
+
+        Two things this must not do, both of which it used to. It must run under
+        no_grad -- without it every batch builds an autograd graph and holds the
+        activations, for a result whose gradient is never used. And it must be
+        capped: the notebook points validation at the training mixture, so an
+        uncapped pass is a second full epoch over ~94,000 images, which took
+        longer than the training epoch itself and then exhausted memory.
+        """
         if self.val_loader is None:
             return {}
         self.model.eval()
+        limit = self.config.training.max_validation_steps
         totals: Dict[str, float] = {}
         count = 0
         for batch in self.val_loader:
+            if limit is not None and count >= limit:
+                break
             views = self._prepare(batch, augment=False)
             outputs = self.model(views["clean_left"], views["clean_right"], directions=("left", "right"))
             state = ObjectiveState(iteration=self.iteration, epoch=epoch, warmup_scale=1.0)
