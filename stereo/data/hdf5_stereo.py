@@ -28,7 +28,7 @@ invent a pairing it cannot verify.
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import AbstractSet, Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -196,9 +196,14 @@ def detect_keyed_pairs(names: Sequence[str]):
 
 
 def keyed_disparity_name(left_name: str, marker: Tuple[str, str],
-                         available: Sequence[str]) -> Optional[str]:
-    """The ground-truth array matching a left-view array, if the file has one."""
-    available = set(available)
+                         available: AbstractSet[str]) -> Optional[str]:
+    """The ground-truth array matching a left-view array, if the file has one.
+
+    ``available`` must be a SET. It used to be built here from a sequence, which
+    made this O(number of arrays) per call for a function called once per pair:
+    on a 189,000-array container with 50,400 pairs that is ~9.5 billion
+    operations, and it was a few hundred seconds of start-up.
+    """
     lowered = left_name.lower()
     index = lowered.rfind(marker[0])
     stem, extension = os.path.splitext(left_name)
@@ -368,7 +373,8 @@ class Hdf5StereoDataset(StereoDataset):
 
         self.keyed_pairs = pairs
         self.keyed_ids = ids
-        self.keyed_disparity = [keyed_disparity_name(left, marker, names) for left, _ in pairs]
+        available = set(names)          # built once, not once per pair
+        self.keyed_disparity = [keyed_disparity_name(left, marker, available) for left, _ in pairs]
         self.keyed_splits = available_splits
         return "keyed", marker[0], marker[1]
 

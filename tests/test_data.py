@@ -321,3 +321,29 @@ def test_index_cache_never_fails_the_build(tmp_path, monkeypatch):
     monkeypatch.setenv("STEREO_INDEX_CACHE", str(tmp_path / "c"))
     sentinel = object()
     assert cached_index(str(tmp_path), "demo", {}, lambda: sentinel, quiet=True) is sentinel
+
+
+def test_keyed_disparity_lookup_is_constant_time_in_the_number_of_arrays():
+    """It is called once per pair, so it must not scan every array name.
+
+    Building the set inside made it O(arrays) per call: on a 189,000-array
+    container with 50,400 pairs that is ~9.5 billion operations, measured at
+    ~233 s of start-up.
+    """
+    import time
+
+    from stereo.data.hdf5_stereo import keyed_disparity_name
+
+    def elapsed(count):
+        names = {f"d/left\\{i:06d}.png" for i in range(count)}
+        names |= {f"d/right\\{i:06d}.png" for i in range(count)}
+        names |= {f"d/disp\\{i:06d}.tif" for i in range(count)}
+        probe = "d/left\\000000.png"
+        start = time.perf_counter()
+        for _ in range(200):
+            assert keyed_disparity_name(probe, ("left", "right"), names) == "d/disp\\000000.tif"
+        return time.perf_counter() - start
+
+    small, large = elapsed(500), elapsed(20_000)
+    # 40x the arrays must not cost meaningfully more per lookup.
+    assert large < small * 5, f"lookup scales with array count: {small:.4f}s vs {large:.4f}s"
