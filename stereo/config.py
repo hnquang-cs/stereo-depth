@@ -78,6 +78,10 @@ class LossWeights:
         """True when the objective has a term that reads ground truth."""
         return bool(self.supervised or self.nsce)
 
+    def uses_labels_for(self, labels) -> bool:
+        """True when this batch has labels AND a term that would use them."""
+        return self.uses_labels and labels is not None and "disparity_gt" in labels
+
     @classmethod
     def monodepth(cls) -> "LossWeights":
         """The Monodepth objective: photometric + left-right + smoothness only.

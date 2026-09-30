@@ -73,9 +73,24 @@ class LabelFreeObjective:
                                        extra_mask=valid_mask)
         return left_terms, right_terms
 
-    def _smoothness_pair(self, outputs, left_image, right_image, key="disparity"):
-        loss_left = self.smoothness(outputs["left"][key], left_image)
-        loss_right = self.smoothness(outputs["right"][key], right_image)
+    def _smoothness_pair(self, outputs, left_image, right_image, key="disparity",
+                         unlabelled=None):
+        """Smoothness, applied only where there is no label.
+
+        Smoothness is a prior standing in for supervision: it says "disparity
+        varies slowly except at image edges" because nothing else constrains the
+        field. Where ground truth exists, it constrains it far better, and the
+        prior only biases the answer -- measurably so, since a flat field is
+        exactly what smoothness rewards. So the two are complementary rather than
+        additive: smooth-L1 where there is a label, smoothness where there is not.
+
+        ``unlabelled`` is 1 on unlabelled pixels. It comes from the LEFT view's
+        mask and is applied to both, which is approximate for the right view by up
+        to one disparity -- immaterial for a gate that only marks which regions
+        are supervised.
+        """
+        loss_left = self.smoothness(outputs["left"][key], left_image, unlabelled)
+        loss_right = self.smoothness(outputs["right"][key], right_image, unlabelled)
         return 0.5 * (loss_left + loss_right)
 
     @staticmethod
@@ -114,6 +129,10 @@ class LabelFreeObjective:
         """
         left_image, right_image = images["left"], images["right"]
         logs: Dict[str, float] = {}
+        #: term -> its WEIGHTED contribution to the total. Raw values answer "how
+        #: big is this residual"; these answer "what is the optimiser actually
+        #: following", which is the question that kept coming up.
+        parts: Dict[str, float] = {}
 
         # ---- photometric reconstruction, full resolution ------------------ #
         photo_left, photo_right = self._photometric_pair(student_outputs, left_image, right_image,
@@ -124,8 +143,29 @@ class LabelFreeObjective:
         logs["photometric_ssim"] = float(0.5 * (photo_left["ssim"] + photo_right["ssim"]).detach())
         logs["valid_warp_ratio"] = float(photo_left["valid_warp"].mean().detach())
 
-        # ---- edge-aware smoothness ---------------------------------------- #
-        smoothness_loss = self._smoothness_pair(student_outputs, left_image, right_image)
+        # ---- which pixels carry a label ----------------------------------- #
+        # Computed here because smoothness is gated by it: the prior applies only
+        # where supervision does not.
+        label_mask = None
+        if labels is not None and self.weights.uses_labels_for(labels):
+            label_mask = labels.get("valid_gt_mask")
+            if label_mask is None:
+                label_mask = torch.ones_like(labels["disparity_gt"])
+            if valid_mask is not None:
+                label_mask = label_mask * valid_mask
+            logs["labelled_ratio"] = float(label_mask.mean())
+
+        unlabelled = None
+        if label_mask is not None:
+            unlabelled = 1.0 - label_mask
+            if valid_mask is not None:
+                unlabelled = unlabelled * valid_mask
+        elif valid_mask is not None:
+            unlabelled = valid_mask
+
+        # ---- edge-aware smoothness, where there is no label ---------------- #
+        smoothness_loss = self._smoothness_pair(student_outputs, left_image, right_image,
+                                                unlabelled=unlabelled)
         logs["smoothness"] = float(smoothness_loss.detach())
 
         # ---- left-right consistency --------------------------------------- #
@@ -147,6 +187,10 @@ class LabelFreeObjective:
         total = (self.weights.photometric * photometric_loss
                  + self.weights.smoothness * smoothness_loss
                  + state.warmup_scale * self.weights.left_right * consistency_normalised)
+        parts["photo"] = float((self.weights.photometric * photometric_loss).detach())
+        parts["smooth"] = float((self.weights.smoothness * smoothness_loss).detach())
+        parts["lr"] = float((state.warmup_scale * self.weights.left_right
+                             * consistency_normalised).detach())
 
         # ---- the same two terms at cost-volume resolution ----------------- #
         if self.weights.low_resolution > 0.0:
@@ -161,6 +205,7 @@ class LabelFreeObjective:
             small_smoothness = self._smoothness_pair(student_outputs, small_left, small_right,
                                                      key="disparity_small")
             logs["photometric_small"] = float(small_photometric.detach())
+            parts["lowres"] = 0.0     # filled below
             total = total + self.weights.low_resolution * (
                 self.weights.photometric * small_photometric + self.weights.smoothness * small_smoothness)
 
@@ -186,12 +231,15 @@ class LabelFreeObjective:
                 # Normalising also makes the weight independent of TRAIN_WIDTH and
                 # DISPARITY_RANGE, so changing either does not silently rebalance
                 # the objective.
-                total = total + self.weights.supervised * terms["loss"] / max(max_disparity, 1.0)
+                contribution = self.weights.supervised * terms["loss"] / max(max_disparity, 1.0)
+                total = total + contribution
+                parts["sL1"] = float(contribution.detach())
                 logs["supervised"] = float(terms["loss"].detach())
                 logs["epe"] = float(terms["epe"])
             if self.weights.nsce > 0.0 and "cost" in student_outputs["left"]:
                 terms = self.nsce(student_outputs["left"]["cost"], target, mask, self.downsample)
                 total = total + self.weights.nsce * terms["loss"]
+                parts["nsce"] = float((self.weights.nsce * terms["loss"]).detach())
                 logs["nsce"] = float(terms["loss"].detach())
                 logs["nsce_in_range"] = float(terms["in_range_ratio"])
 
@@ -205,7 +253,10 @@ class LabelFreeObjective:
                 self.lr_occlusion_threshold,
                 self.photometric_reliability_threshold)
             confidence_terms = self.confidence(student_outputs["left"]["matchability"], reliability)
-            total = total + state.warmup_scale * self.weights.confidence * confidence_terms["loss"]
+            confidence_contribution = (state.warmup_scale * self.weights.confidence
+                                       * confidence_terms["loss"])
+            total = total + confidence_contribution
+            parts["conf"] = float(confidence_contribution.detach())
             logs["confidence_loss"] = float(confidence_terms["loss"].detach())
             logs["mean_confidence"] = float(confidence_terms["mean_confidence"])
             logs["mean_reliability"] = float(confidence_terms["mean_reliability"])
@@ -218,6 +269,7 @@ class LabelFreeObjective:
             # Normalised by the range so the term is scale-free across resolutions.
             range_loss = excess / max(max_disparity, 1.0)
             total = total + self.weights.range_penalty * range_loss
+            parts["range"] = float((self.weights.range_penalty * range_loss).detach())
             logs["range_penalty"] = float(range_loss.detach())
 
         # How far the refinement moves the prediction away from the cost volume's
@@ -241,7 +293,8 @@ class LabelFreeObjective:
         logs["disparity_max"] = float(disparity.max())
         logs["total"] = float(total.detach())
 
-        return {"loss": total, "logs": logs,
+        logs.update({f"part/{name}": value for name, value in parts.items()})
+        return {"loss": total, "logs": logs, "parts": parts,
                 "aux": {"photometric_left": photo_left, "consistency": consistency}}
 
 

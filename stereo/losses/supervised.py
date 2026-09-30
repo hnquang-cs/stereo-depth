@@ -7,6 +7,7 @@ all-zero mask and therefore nothing.
 
 from __future__ import annotations
 
+import math
 from typing import Dict, Optional
 
 import torch
@@ -95,5 +96,10 @@ class NsceLoss(nn.Module):
         # Only where the true disparity is inside the search range; outside it the
         # Laplacian is truncated and the target is a fiction.
         in_range = (small_target < cost.shape[1]).to(cost.dtype)
-        return {"loss": masked_mean(cross_entropy, small_mask * in_range),
+        loss = masked_mean(cross_entropy, small_mask * in_range)
+        # Normalised by log(D), the cross-entropy of a uniform prediction. The
+        # term is then ~1 when the cost volume knows nothing and ~0 when it is
+        # right, on the same scale as every other term, and the weight no longer
+        # changes meaning when the search range does.
+        return {"loss": loss / math.log(max(cost.shape[1], 2)),
                 "in_range_ratio": (small_mask * in_range).sum() / small_mask.sum().clamp(min=1.0)}

@@ -510,45 +510,60 @@ class Trainer:
                   f"epochs, lower batch_size, or -- far better -- attach more data.\n"
                   f"  Expect the result to be close to its initialisation, not a trained model.")
 
+    @staticmethod
+    def _breakdown(logs: Dict[str, float]) -> str:
+        """The loss written as what it is made of, largest term first.
+
+        Weighted contributions, not raw values: raw numbers answer "how big is
+        this residual", which does not say what the optimiser is following. A
+        term can be numerically large and contribute almost nothing, or small and
+        dominate -- and reading the wrong one is how a term at 99% of the
+        objective went unnoticed.
+        """
+        parts = {name[5:]: value for name, value in logs.items() if name.startswith("part/")}
+        parts = {name: value for name, value in parts.items() if abs(value) > 1e-9}
+        if not parts:
+            return ""
+        total = sum(parts.values()) or 1.0
+        ordered = sorted(parts.items(), key=lambda item: -abs(item[1]))
+        return "  ".join(f"{name} {value:.4f}({100 * value / total:.0f}%)"
+                         for name, value in ordered)
+
     def _log_iteration(self, epoch: int, step: int, steps: int, logs: Dict[str, float]) -> None:
-        parts = [f"ep {epoch} [{step + 1}/{steps}]",
-                 f"loss {logs['total']:.4f}",
-                 f"photo {logs['photometric']:.4f}",
-                 f"(ssim {logs['photometric_ssim']:.3f} l1 {logs['photometric_l1']:.3f})",
-                 f"smooth {logs['smoothness']:.4f}",
-                 f"lr_cons {logs['left_right']:.4f}"]
-        # The supervised terms dominate the total when they are on, so they are
-        # shown next to it rather than left to be inferred from the difference.
-        if "supervised" in logs:
-            parts.append(f"sL1 {logs['supervised']:.3f}(epe {logs['epe']:.2f})")
-        if "nsce" in logs:
-            parts.append(f"nsce {logs['nsce']:.2f}")
+        head = f"ep {epoch} [{step + 1}/{steps}]  loss {logs['total']:.4f}"
+        breakdown = self._breakdown(logs)
+        detail = [f"d[{logs['disparity_min']:.1f},{logs['disparity_max']:.1f}]"
+                  f" mean {logs['disparity_mean']:.1f}",
+                  f"warp {100 * logs['valid_warp_ratio']:.0f}%"]
+        if "epe" in logs:
+            detail.append(f"epe {logs['epe']:.2f}px")
         if "labelled_ratio" in logs:
-            parts.append(f"lab {logs['labelled_ratio']:.2f}")
-        if "mean_confidence" in logs:
-            parts.append(f"conf {logs['mean_confidence']:.3f}")
-        parts.append(f"d[{logs['disparity_min']:.1f},{logs['disparity_max']:.1f}] "
-                     f"mean {logs['disparity_mean']:.2f}")
-        parts.append(f"warp {logs['valid_warp_ratio']:.3f}")
+            detail.append(f"labelled {100 * logs['labelled_ratio']:.0f}%")
         if "refine_delta" in logs:
-            parts.append(f"cv {logs['cost_volume_mean']:.1f} refine{logs['refine_delta']:+.1f}")
-        parts.append(f"lr {self.scheduler.get_last_lr()[0]:.2e}")
-        print("  " + "  ".join(parts))
+            detail.append(f"refine{logs['refine_delta']:+.1f}")
+        detail.append(f"lr {self.scheduler.get_last_lr()[0]:.1e}")
+
+        print(f"  {head}  =  {breakdown}" if breakdown else f"  {head}")
+        print(f"       {'  '.join(detail)}")
 
     def _print_epoch(self, epoch: int, train_logs, val_logs) -> None:
-        parts = [f"epoch {epoch:3d}",
-                 f"train_loss {train_logs['total']:.4f}",
-                 f"photo {train_logs['photometric']:.4f}"]
-        if "supervised" in train_logs:
-            parts.append(f"sL1 {train_logs['supervised']:.3f}(epe {train_logs['epe']:.2f})")
-        if "nsce" in train_logs:
-            parts.append(f"nsce {train_logs['nsce']:.2f}")
-        parts.append(f"lr_cons {train_logs['left_right']:.4f}(w={self.config.loss.left_right:g})")
-        parts.append(f"{train_logs['seconds']:.0f}s")
-        line = "  ".join(parts)
-        if val_logs:
-            line += f"  | val photo {val_logs.get('val/photometric', float('nan')):.4f}"
+        line = f"epoch {epoch:3d}  loss {train_logs['total']:.4f}"
+        breakdown = self._breakdown(train_logs)
+        if breakdown:
+            line += f"  =  {breakdown}"
         print(line)
+
+        detail = [f"{train_logs['seconds']:.0f}s"]
+        if "epe" in train_logs:
+            detail.append(f"epe {train_logs['epe']:.2f}px")
+        if "labelled_ratio" in train_logs:
+            detail.append(f"labelled {100 * train_logs['labelled_ratio']:.0f}%")
+        if val_logs:
+            detail.append(f"val loss {val_logs.get('val/total', float('nan')):.4f}")
+            detail.append(f"val photo {val_logs.get('val/photometric', float('nan')):.4f}")
+            if "val/epe" in val_logs:
+                detail.append(f"val epe {val_logs['val/epe']:.2f}px")
+        print(f"           {'  '.join(detail)}")
 
     def _check_collapse(self, averages: Dict[str, float]) -> None:
         """Warn when training looks like it is degenerating."""

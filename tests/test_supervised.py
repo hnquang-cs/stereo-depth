@@ -132,3 +132,63 @@ def test_an_all_unlabelled_batch_contributes_nothing_supervised():
     logs = _objective_run(LossWeights(), labels)["logs"]
     assert float(logs["labelled_ratio"]) == 0.0
     assert float(logs["supervised"]) == 0.0
+
+
+# -- the three requested changes -------------------------------------------- #
+
+def test_nsce_is_normalised_by_a_uniform_prediction():
+    """~1 when the cost volume knows nothing, ~0 when it is right, so the weight
+    means the same thing at any search range."""
+    import math
+
+    loss = NsceLoss()
+    for bins in (8, 16, 64):
+        uniform = torch.zeros(1, bins, 4, 4)
+        target = torch.full((1, 1, 4, 4), 2.0 * 4)
+        value = float(loss(uniform, target, torch.ones_like(target), 4)["loss"])
+        assert 0.8 < value < 1.2, f"{bins} bins: {value}"
+
+    # A correct volume scores well below uniform, but NOT ~0: the target is a
+    # Laplacian (lambda 0.3), not one-hot, so the floor is its own entropy --
+    # roughly 0.1 normalised. Asserting 0 would be asserting the wrong minimum.
+    target = torch.full((1, 1, 4, 4), 2.0 * 4)
+    peaked = torch.full((1, 16, 4, 4), 20.0)
+    peaked[:, 2] = 0.0
+    right = float(loss(peaked, target, torch.ones_like(target), 4)["loss"])
+    wrong = torch.full((1, 16, 4, 4), 20.0)
+    wrong[:, 11] = 0.0
+    assert right < 0.6 < float(loss(wrong, target, torch.ones_like(target), 4)["loss"])
+
+
+def test_smoothness_applies_only_where_there_is_no_label():
+    """Smoothness is a prior standing in for supervision. Where ground truth
+    exists it constrains the field better, and the prior only biases it."""
+    from stereo.losses import SmoothnessLoss
+
+    torch.manual_seed(0)
+    disparity = torch.rand(1, 1, 16, 32) * 10
+    image = torch.rand(1, 3, 16, 32)
+    smoothness = SmoothnessLoss()
+
+    everywhere = float(smoothness(disparity, image, None))
+    half = torch.ones(1, 1, 16, 32)
+    half[..., :8, :] = 0.0                       # top half is labelled
+    gated = float(smoothness(disparity, image, half))
+    assert gated != everywhere
+    # Fully labelled: the prior contributes nothing at all.
+    assert float(smoothness(disparity, image, torch.zeros_like(half))) == 0.0
+
+
+def test_the_objective_reports_weighted_contributions_that_sum_to_the_loss():
+    """Raw values do not say what the optimiser follows; contributions do."""
+    labels = {"disparity_gt": torch.full((2, 1, 32, 96), 6.0),
+              "valid_gt_mask": torch.ones(2, 1, 32, 96)}
+    result = _objective_run(LossWeights(), labels)
+    parts = result["parts"]
+    assert parts, "no contributions recorded"
+    assert sum(parts.values()) == pytest.approx(float(result["loss"]), rel=1e-4)
+    for name in ("photo", "lr", "sL1", "nsce"):
+        assert name in parts, name
+    # Mirrored into logs so the trainer can print them without the tensor graph.
+    for name, value in parts.items():
+        assert result["logs"][f"part/{name}"] == pytest.approx(value)

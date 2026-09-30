@@ -79,8 +79,8 @@ ALLOWED_ZONE = (
 #: training loop prints these, so the pattern is exempted narrowly (a dict lookup
 #: or membership test keyed by the metric name) rather than by exempting the file.
 LOG_ACCESS = re.compile(
-    r"""(?:logs|train_logs|val_logs|averages)(?:\.get)?\s*[\[(]\s*["'](\w+)["']"""
-    r"""|["'](\w+)["']\s+in\s+(?:logs|train_logs|val_logs|averages)""")
+    r"""(?:logs|train_logs|val_logs|averages)(?:\.get)?\s*[\[(]\s*["']([\w/]+)["']"""
+    r"""|["']([\w/]+)["']\s+in\s+(?:logs|train_logs|val_logs|averages)""")
 
 FORBIDDEN_IMPORTS = ("from ..evaluation", "from stereo.evaluation", "import stereo.evaluation",
                      "from .evaluation import")
