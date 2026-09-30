@@ -274,3 +274,50 @@ def test_colour_jitter_keeps_the_pair_consistent():
     out = augment({"left": image.copy(), "right": image.copy()})
     assert np.abs(out["left"] - out["right"]).max() < 1e-6, "views were jittered differently"
     assert np.abs(out["left_clean"] - image).max() == 0.0, "the clean view must be untouched"
+
+
+def test_index_cache_returns_the_same_result_and_can_be_disabled(tmp_path, monkeypatch):
+    """Indexing dominates start-up on a network mount -- 2756 s for 43,552 KITTI
+    pairs on Kaggle -- and the notebook builds each dataset more than once."""
+    from stereo.data import index_cache
+    from stereo.data.index_cache import cached_index
+
+    monkeypatch.setenv("STEREO_INDEX_CACHE", str(tmp_path / "cache"))
+    index_cache._MEMORY.clear()
+    root = tmp_path / "data"
+    root.mkdir()
+
+    calls = {"n": 0}
+    def build():
+        calls["n"] += 1
+        return [f"pair{i}" for i in range(50)]
+
+    first = cached_index(str(root), "demo", {}, build, quiet=True)
+    index_cache._MEMORY.clear()                       # force the disk path
+    second = cached_index(str(root), "demo", {}, build, quiet=True)
+    assert first == second and calls["n"] == 1, "the cache did not serve the second call"
+
+    # Different options must not collide.
+    cached_index(str(root), "demo", {"split": "TEST"}, build, quiet=True)
+    assert calls["n"] == 2
+
+    monkeypatch.setenv("STEREO_INDEX_CACHE", "off")
+    index_cache._MEMORY.clear()
+    cached_index(str(root), "demo", {}, build, quiet=True)
+    assert calls["n"] == 3, "caching must be switchable off"
+
+
+def test_index_cache_never_fails_the_build(tmp_path, monkeypatch):
+    """Caching is an optimisation. An unwritable directory or an unserialisable
+    result must not break dataset construction."""
+    from stereo.data import index_cache
+    from stereo.data.index_cache import cached_index
+
+    monkeypatch.setenv("STEREO_INDEX_CACHE", "/proc/nonexistent/unwritable")
+    index_cache._MEMORY.clear()
+    assert cached_index(str(tmp_path), "demo", {}, lambda: [1, 2, 3], quiet=True) == [1, 2, 3]
+
+    index_cache._MEMORY.clear()
+    monkeypatch.setenv("STEREO_INDEX_CACHE", str(tmp_path / "c"))
+    sentinel = object()
+    assert cached_index(str(tmp_path), "demo", {}, lambda: sentinel, quiet=True) is sentinel

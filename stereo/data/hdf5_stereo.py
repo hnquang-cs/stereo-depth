@@ -32,6 +32,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from .index_cache import cached_index
 from .base import DatasetMode, StereoDataset
 
 HDF5_EXTENSIONS = (".h5", ".hdf5", ".hdf", ".he5")
@@ -69,17 +70,27 @@ def find_hdf5_files(root: str, max_depth: int = 6) -> List[str]:
 
 
 def list_arrays(path: str) -> List[Tuple[str, Tuple[int, ...], str]]:
-    """``[(name, shape, dtype), ...]`` for every array in the file, groups included."""
-    h5py = _require_h5py()
-    arrays: List[Tuple[str, Tuple[int, ...], str]] = []
+    """``[(name, shape, dtype), ...]`` for every array in the file, groups included.
 
-    def visit(name, node):
-        if isinstance(node, h5py.Dataset):
-            arrays.append((name, tuple(node.shape), str(node.dtype)))
+    Cached: visiting every object is the whole cost of opening one of these
+    containers, and it is paid again for each dataset built from the same file.
+    Measured on Kaggle, a 31.7 GB container holding 189,000 arrays took 596 s to
+    enumerate, and the notebook does it more than once per run.
+    """
+    def build():
+        h5py = _require_h5py()
+        arrays: List[Tuple[str, Tuple[int, ...], str]] = []
 
-    with h5py.File(path, "r") as handle:
-        handle.visititems(visit)
-    return arrays
+        def visit(name, node):
+            if isinstance(node, h5py.Dataset):
+                arrays.append([name, list(node.shape), str(node.dtype)])
+
+        with h5py.File(path, "r") as handle:
+            handle.visititems(visit)
+        return arrays
+
+    rows = cached_index(path, "hdf5-arrays", {}, build)
+    return [(name, tuple(shape), dtype) for name, shape, dtype in rows]
 
 
 def summarise_arrays(arrays: Sequence[Tuple[str, Tuple[int, ...], str]],
