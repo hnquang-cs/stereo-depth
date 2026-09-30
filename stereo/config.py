@@ -22,14 +22,16 @@ from .postprocess import PostProcessConfig
 class LossWeights:
     """Weights of the label-free objective.  There is no ground-truth term.
 
-    **The default is semi-supervised**: the Monodepth terms on every sample, plus
-    smooth-L1 and NSCE on the samples that happen to carry a label. Labelled and
-    unlabelled datasets therefore mix freely in one batch -- KITTI contributes
-    through the photometric terms, FlyingThings3D and Middlebury through both.
+    **The default is label-free**: the Monodepth objective and nothing else.
+    Ground truth is not read during training at all, which
+    :func:`stereo.data.assert_label_free` enforces on every batch and
+    ``scripts/audit_label_leakage.py`` audits statically.
 
-    ``LossWeights.monodepth()`` sets ``supervised`` and ``nsce`` to 0 and
-    recovers the label-free objective exactly, which is the baseline to compare
-    against. That is the
+    Supervised terms exist and are off. Setting ``supervised`` and ``nsce``
+    above 0 turns training semi-supervised: those terms are masked means over
+    labelled pixels, so labelled and unlabelled datasets mix freely in one batch
+    and a dataset without ground truth simply contributes nothing to them. That
+    also switches off the per-batch label-free assertion, deliberately. That is the
     self-supervised half of what this package is: the paper's cost-volume
     architecture (arXiv:2109.11644) trained by Monodepth's self-supervised
     losses.
@@ -57,11 +59,11 @@ class LossWeights:
     #: Smooth-L1 on the disparity. Applied as a masked mean over labelled pixels,
     #: so a batch mixing labelled and unlabelled datasets needs no branching: an
     #: unlabelled sample carries an all-zero mask and contributes nothing.
-    supervised: float = 1.0
+    supervised: float = 0.0
     #: The paper's NSCE term on the cost volume (arXiv:2005.08806, 0.05;
     #: arXiv:2109.11644, 0.2). It needs ground truth, which is why the label-free
     #: configuration omits it rather than substituting anything.
-    nsce: float = 0.2
+    nsce: float = 0.0
 
     # -- not part of the Monodepth objective; off unless enabled ------------- #
     #: Label-free matchability target. Not from either paper.

@@ -99,6 +99,11 @@ def test_a_batch_may_mix_labelled_and_unlabelled_samples():
 
 # -- end to end ------------------------------------------------------------- #
 
+#: Supervised weights, stated explicitly: the DEFAULT objective is label-free,
+#: so these tests must turn the terms on rather than assume them.
+SUPERVISED = LossWeights(supervised=1.0, nsce=0.2)
+
+
 def _objective_run(weights, labels):
     torch.manual_seed(0)
     model = StereoNet(StereoNetConfig.for_width(96, downsample=4, backbone_width=4,
@@ -113,11 +118,11 @@ def _objective_run(weights, labels):
 def test_the_objective_reports_supervised_terms_only_when_labels_are_present():
     labels = {"disparity_gt": torch.full((2, 1, 32, 96), 6.0),
               "valid_gt_mask": torch.ones(2, 1, 32, 96)}
-    supervised = _objective_run(LossWeights(), labels)["logs"]
+    supervised = _objective_run(SUPERVISED, labels)["logs"]
     for key in ("supervised", "epe", "nsce", "labelled_ratio"):
         assert key in supervised, key
 
-    unlabelled = _objective_run(LossWeights(), None)["logs"]
+    unlabelled = _objective_run(SUPERVISED, None)["logs"]
     for key in ("supervised", "epe", "nsce"):
         assert key not in unlabelled, f"{key} reported without labels"
     # The Monodepth terms apply to every sample, labelled or not -- which is how
@@ -129,7 +134,7 @@ def test_the_objective_reports_supervised_terms_only_when_labels_are_present():
 def test_an_all_unlabelled_batch_contributes_nothing_supervised():
     labels = {"disparity_gt": torch.zeros(2, 1, 32, 96),
               "valid_gt_mask": torch.zeros(2, 1, 32, 96)}
-    logs = _objective_run(LossWeights(), labels)["logs"]
+    logs = _objective_run(SUPERVISED, labels)["logs"]
     assert float(logs["labelled_ratio"]) == 0.0
     assert float(logs["supervised"]) == 0.0
 
@@ -183,7 +188,7 @@ def test_the_objective_reports_weighted_contributions_that_sum_to_the_loss():
     """Raw values do not say what the optimiser follows; contributions do."""
     labels = {"disparity_gt": torch.full((2, 1, 32, 96), 6.0),
               "valid_gt_mask": torch.ones(2, 1, 32, 96)}
-    result = _objective_run(LossWeights(), labels)
+    result = _objective_run(SUPERVISED, labels)
     parts = result["parts"]
     assert parts, "no contributions recorded"
     assert sum(parts.values()) == pytest.approx(float(result["loss"]), rel=1e-4)
@@ -192,3 +197,17 @@ def test_the_objective_reports_weighted_contributions_that_sum_to_the_loss():
     # Mirrored into logs so the trainer can print them without the tensor graph.
     for name, value in parts.items():
         assert result["logs"][f"part/{name}"] == pytest.approx(value)
+
+
+def test_the_default_objective_reads_no_labels_at_all():
+    """The default is label-free: supervised terms off, and labels ignored even
+    when a batch carries them."""
+    weights = LossWeights()
+    assert weights.supervised == 0.0 and weights.nsce == 0.0
+    assert not weights.uses_labels
+
+    labels = {"disparity_gt": torch.full((2, 1, 32, 96), 6.0),
+              "valid_gt_mask": torch.ones(2, 1, 32, 96)}
+    logs = _objective_run(weights, labels)["logs"]
+    for key in ("supervised", "epe", "nsce", "labelled_ratio"):
+        assert key not in logs, f"{key} reported by a label-free objective"
