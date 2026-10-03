@@ -20,17 +20,14 @@ What it writes under ``--out``, and why:
     kitti2015/training              the 200 + 194 frame pairs that have ground
     kitti2012/training              truth (frame _10); the archives' other frames
                                     are unlabelled or the test set
-    instereo2k/train, test          2,000 + 50 indoor pairs, shrunk from 1080 px,
-                                    when a download of it is given (--instereo2k):
-                                    its hosts, OneDrive and Baidu, cannot be scripted
     stereo_data_manifest.json       marks the directory; the notebook finds it
 
 Every release is then checked by warping (:func:`stereo.data.check_label_scale`),
 flipped as well as not, and the run fails rather than leave labels it could not
 confirm.
 
-KITTI is licensed CC BY-NC-SA 3.0, InStereo2K is for non-commercial use, and
-Middlebury asks to be cited; a dataset made from this output is for private use.
+KITTI is licensed CC BY-NC-SA 3.0, and Middlebury asks to be cited; a dataset
+made from this output is for private use.
 """
 
 from __future__ import annotations
@@ -379,115 +376,6 @@ def prepare_kitti(out: str, cache: str, workers: int = 4) -> List[str]:
 
 
 # --------------------------------------------------------------------------- #
-# InStereo2K
-# --------------------------------------------------------------------------- #
-
-#: Forms an InStereo2K download may come in.
-ARCHIVE_SUFFIXES = (".zip", ".7z", ".rar", ".tar", ".tar.gz", ".tgz")
-
-
-def unpack(archive: str, target: str) -> None:
-    """Extract a .zip with Python, a tar with tar, anything else with 7z."""
-    os.makedirs(target, exist_ok=True)
-    lowered = archive.lower()
-    if lowered.endswith(".zip"):
-        extract(archive, target)
-    elif lowered.endswith((".tar", ".tar.gz", ".tgz")):
-        subprocess.run(["tar", "-xf", archive, "-C", target], check=True)
-    else:
-        tool = shutil.which("7z") or shutil.which("7za") or shutil.which("7zz")
-        if tool is None:
-            raise RuntimeError(f"{archive} needs 7z to extract (apt-get install p7zip-full)")
-        subprocess.run([tool, "x", "-y", f"-o{target}", archive], check=True,
-                       stdout=subprocess.DEVNULL)
-
-
-def find_instereo2k(search_root: str = "/kaggle/input", max_depth: int = 4) -> Optional[str]:
-    """An attached InStereo2K download, found by its name."""
-    from .discovery import walk_dirs
-
-    if not os.path.isdir(search_root):
-        return None
-    for directory in walk_dirs(search_root, max_depth=max_depth):
-        if "instereo" in os.path.basename(directory).lower():
-            return directory
-    return None
-
-
-def shrink_instereo2k_scene(source: str, target: str, max_width: int) -> int:
-    """Copy one InStereo2K scene at ``1/k`` size, keeping its x100 PNG encoding.
-
-    The stored values are reduced in their own units, so whichever scale the
-    files truly use survives the shrink unchanged. Returns ``k``.
-    """
-    from .instereo2k import DISPARITIES, VIEWS
-
-    left = cv2.imread(os.path.join(source, VIEWS[0]), cv2.IMREAD_COLOR)
-    if left is None:
-        raise FileNotFoundError(f"no {VIEWS[0]} in {source}")
-    height, width = left.shape[:2]
-    factor = max(1, math.ceil(width / max_width))
-    rows, cols = height // factor, width // factor
-    os.makedirs(target, exist_ok=True)
-    for name in VIEWS:
-        image = left if name == VIEWS[0] else cv2.imread(os.path.join(source, name), cv2.IMREAD_COLOR)
-        cv2.imwrite(os.path.join(target, name),
-                    cv2.resize(image[:rows * factor, :cols * factor], (cols, rows),
-                               interpolation=cv2.INTER_AREA))
-    for name in DISPARITIES:
-        path = os.path.join(source, name)
-        if not os.path.exists(path):
-            continue
-        stored = cv2.imread(path, cv2.IMREAD_UNCHANGED).astype(np.float32)
-        if stored.ndim == 3:
-            stored = stored[..., 0]
-        shrunk = shrink_disparity(np.where(stored > 0, stored, np.inf), factor)
-        encoded = np.where(np.isfinite(shrunk), np.round(shrunk), 0)
-        cv2.imwrite(os.path.join(target, name), np.clip(encoded, 0, 65535).astype(np.uint16))
-    return factor
-
-
-def prepare_instereo2k(out: str, source: str, cache: str, max_width: int = 960) -> str:
-    """Copy an InStereo2K download into ``out/instereo2k``.
-
-    It has no scriptable source, so ``source`` is what was fetched by hand: the
-    archive, or a folder holding it or its extracted contents -- such as the
-    dataset uploaded to Kaggle.
-    """
-    from .instereo2k import find_scenes, scene_split
-
-    print(f"\ninstereo2k  <- {source}")
-    root = source
-    if os.path.isfile(source):
-        root = os.path.join(cache, "unpacked")
-        unpack(source, root)
-    elif not find_scenes(source):
-        archives = sorted(os.path.join(directory, name) for directory, _, names in os.walk(source)
-                          for name in names if name.lower().endswith(ARCHIVE_SUFFIXES))
-        if not archives:
-            raise RuntimeError(f"no InStereo2K scenes or archives under {source}")
-        root = os.path.join(cache, "unpacked")
-        for archive in archives:
-            print(f"  unpacking {os.path.basename(archive)}")
-            unpack(archive, root)
-
-    scenes = find_scenes(root)
-    if not scenes:
-        raise RuntimeError(f"no InStereo2K scenes (left.png, right.png, left_disp.png) "
-                           f"in {source}")
-    counts: Dict[str, int] = defaultdict(int)
-    factors = set()
-    for scene in scenes:
-        relative = os.path.relpath(scene, root)
-        factors.add(shrink_instereo2k_scene(scene, os.path.join(out, "instereo2k", relative),
-                                            max_width))
-        counts[scene_split(root, scene) or "train"] += 1
-    print(f"  {', '.join(f'{split} {n}' for split, n in sorted(counts.items()))} scenes, "
-          f"shrunk by {sorted(factors)}")
-    return os.path.join(out, "instereo2k")
-
-
-# --------------------------------------------------------------------------- #
 # Checking
 # --------------------------------------------------------------------------- #
 
@@ -525,28 +413,6 @@ def verify(out: str) -> List[str]:
                                 f"{flip.best_factor if flip else 'n/a'})")
             if not mirrored:
                 problems.append(f"middlebury {release}: no right-view disparity")
-
-    root = os.path.join(out, "instereo2k")
-    if os.path.isdir(root):
-        from .instereo2k import DISPARITY_SCALE, InStereo2kDataset
-
-        plain = InStereo2kDataset(root, split=None, mode=DatasetMode.BENCHMARK)
-        flipped = InStereo2kDataset(root, split=None, mode=DatasetMode.TRAIN,
-                                    transform=HorizontalFlip(HorizontalFlipConfig(probability=1.0), 0))
-        flipped.with_labels = True
-        picks = list(range(0, len(plain), max(1, len(plain) // 6)))[:6]
-        # The README says /100, torchvision reads /1024: the scan includes both.
-        factors = (DISPARITY_SCALE / 1024, 0.125, 0.25, 0.5, 1.0, 2.0, 4.0)
-        report = check_label_scale([plain[i] for i in picks], factors=factors)
-        flip = check_label_scale([flipped[i] for i in picks], factors=factors)
-        ok = report.consistent and flip.consistent
-        print(f"  instereo2k {len(plain):>4} pairs   labels x{report.best_factor:.3g}   "
-              f"flipped x{flip.best_factor:.3g}   {'ok' if ok else 'WRONG'}")
-        if not ok:
-            hint = (" -- that is /1024, as torchvision reads it; set DISPARITY_SCALE = 1024 "
-                    "in stereo/data/instereo2k.py"
-                    if math.isclose(report.best_factor, DISPARITY_SCALE / 1024) else "")
-            problems.append(f"instereo2k: labels look off by x{report.best_factor:.3g}{hint}")
 
     for name, expected in KITTI_PAIRS.items():
         path = os.path.join(out, name)
@@ -588,12 +454,8 @@ def find_prepared(search_root: str = "/kaggle/input", max_depth: int = 5) -> Opt
 
 def prepare_all(out: str, cache: Optional[str] = None, max_width: int = 960,
                 middlebury: bool = True, kitti: bool = True, workers: int = 6,
-                keep_cache: bool = False, instereo2k: Optional[str] = None) -> str:
-    """Download, assemble and check everything; writes the manifest last.
-
-    ``instereo2k`` is a hand-made InStereo2K download (archive or folder), or
-    ``None`` to leave it out.
-    """
+                keep_cache: bool = False) -> str:
+    """Download, assemble and check everything; writes the manifest last."""
     out = os.path.abspath(out)
     cache = cache or os.path.join(tempfile.gettempdir(), "stereo-prepare-cache")
     if os.path.commonpath([out, os.path.abspath(cache)]) == out:
@@ -605,15 +467,13 @@ def prepare_all(out: str, cache: Optional[str] = None, max_width: int = 960,
         prepare_middlebury(out, os.path.join(cache, "middlebury"), max_width, workers)
     if kitti:
         prepare_kitti(out, os.path.join(cache, "kitti"))
-    if instereo2k:
-        prepare_instereo2k(out, instereo2k, os.path.join(cache, "instereo2k"), max_width)
 
     problems = verify(out)
     if problems:
         raise RuntimeError("the prepared data failed its checks:\n  " + "\n  ".join(problems))
 
     contents = {name: round(directory_megabytes(os.path.join(out, name)), 1)
-                for name in ("middlebury", "kitti2015", "kitti2012", "instereo2k")
+                for name in ("middlebury", "kitti2015", "kitti2012")
                 if os.path.isdir(os.path.join(out, name))}
     with open(os.path.join(out, MANIFEST), "w") as handle:
         json.dump({"format": 1, "max_width": max_width, "megabytes": contents,
@@ -635,8 +495,6 @@ def main() -> None:
                         help="shrink 2014 and 2021 scenes to at most this many pixels wide")
     parser.add_argument("--skip-middlebury", action="store_true")
     parser.add_argument("--skip-kitti", action="store_true")
-    parser.add_argument("--instereo2k", help="an InStereo2K download (archive or folder) to "
-                                             "include; it cannot be fetched automatically")
     parser.add_argument("--workers", type=int, default=6, help="parallel Middlebury downloads")
     parser.add_argument("--keep-cache", action="store_true", help="keep the downloads afterwards")
     parser.add_argument("--verify-only", action="store_true",
@@ -647,7 +505,7 @@ def main() -> None:
         print("\n" + ("\n".join(problems) if problems else "all checks passed"))
         raise SystemExit(1 if problems else 0)
     prepare_all(args.out, args.cache, args.max_width, not args.skip_middlebury,
-                not args.skip_kitti, args.workers, args.keep_cache, args.instereo2k)
+                not args.skip_kitti, args.workers, args.keep_cache)
 
 
 if __name__ == "__main__":

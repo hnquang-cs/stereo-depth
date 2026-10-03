@@ -23,7 +23,6 @@ from .augmentation import PhotometricAugmentConfig, ResizeConfig, build_train_tr
 from .base import DatasetMode, StereoDataset, collate_samples
 from .eth3d import Eth3dDataset
 from .hdf5_stereo import Hdf5StereoDataset, find_hdf5_files
-from .instereo2k import InStereo2kDataset
 from .kitti import KittiStereoDataset
 from .middlebury import MiddleburyDataset
 from .sceneflow import SceneFlowDataset
@@ -36,7 +35,6 @@ DATASET_TYPES = {
     "middlebury": MiddleburyDataset,
     "eth3d": Eth3dDataset,
     "hdf5": Hdf5StereoDataset,
-    "instereo2k": InStereo2kDataset,
 }
 
 

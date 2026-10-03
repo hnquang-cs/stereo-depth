@@ -11,14 +11,12 @@ quota for as long as it took:
 
 | Dataset | Source | Share | Role |
 |---|---|---|---|
-| FlyingThings3D | `kiraarsene/flying-things-3d` | 50% | **TRAIN split only**; TEST is the paper's Table IV benchmark, held out |
+| FlyingThings3D | `kiraarsene/flying-things-3d` | 65% | **TRAIN split only**; TEST is the paper's Table IV benchmark, held out |
 | Middlebury | the prepared dataset | 25% | every release with public ground truth |
-| InStereo2K | the prepared dataset (from a manual download) | 15% | 2,000 indoor training pairs |
 | KITTI 2015, 2012 | the prepared dataset | 5% + 5% | the 200 + 194 labelled training pairs |
 
 ```python
-DATASETS = {"sceneflow": 0.50, "middlebury": 0.25, "instereo2k": 0.15,
-            "kitti2015": 0.05, "kitti2012": 0.05}
+DATASETS = {"sceneflow": 0.65, "middlebury": 0.25, "kitti2015": 0.05, "kitti2012": 0.05}
 SCENEFLOW_SPLIT = "TRAIN"     # holds out the paper's evaluation split
 ```
 
@@ -29,20 +27,7 @@ SCENEFLOW_SPLIT = "TRAIN"     # holds out the paper's evaluation split
 what has ground truth, shrinks the 3000 px 2014 and 1920 px 2021 scenes to at most 960 px,
 checks every release by warping, and writes about 1 GB. Saved as a private Kaggle dataset
 and attached, it is found by its `stereo_data_manifest.json`. Without it, Middlebury falls
-back to the `minhanhtruong/middleburystereodataset` mirror, and KITTI and InStereo2K are
-skipped.
-
-**InStereo2K cannot be downloaded by a script**: its only hosts are OneDrive and Baidu
-([official page](https://github.com/YuhuaXu/StereoDataset)). Fetch it once in a browser,
-upload it as a private Kaggle dataset with *instereo* in its name, and attach it to the
-preparation notebook, which finds it by that name, shrinks it from 1080 to 540 px and adds
-it to the prepared dataset.
-
-Its disparity is a 16-bit PNG of `disparity x 100` (0 = unknown) according to its README;
-torchvision's loader divides by 1024 instead, which torchvision's own issue tracker reports
-as a bug ([pytorch/vision#7129](https://github.com/pytorch/vision/issues/7129)). The
-preparation measures both on the real files and fails, naming the fix, if the README's
-scale is the wrong one.
+back to the `minhanhtruong/middleburystereodataset` mirror and KITTI is skipped.
 
 KITTI's 394 pairs are all its stereo benchmarks label: one frame (`_10`) per scene, with
 LiDAR ground truth (and, for 2015, fitted car models); the test sets' ground truth is
