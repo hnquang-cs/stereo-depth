@@ -6,6 +6,7 @@ from .base import (GROUND_TRUTH_KEYS, DatasetMode, StereoDataset, assert_label_f
                    collate_samples, metadata_tensor)
 from .eth3d import Eth3dDataset
 from .hdf5_stereo import Hdf5StereoDataset, inspect_hdf5
+from .instereo2k import InStereo2kDataset
 from .kitti import KittiStereoDataset
 from .middlebury import MiddleburyDataset
 from .registry import (DatasetSpec, build_benchmark_dataset, build_dataset, build_loader,
@@ -16,6 +17,7 @@ from .stereo_folder import StereoFolderDataset
 __all__ = ["HorizontalFlip", "HorizontalFlipConfig", "check_label_scale", "LabelScaleReport", "DatasetMode", "StereoDataset", "assert_label_free", "GROUND_TRUTH_KEYS",
            "collate_samples", "metadata_tensor", "StereoFolderDataset", "SceneFlowDataset",
            "KittiStereoDataset", "MiddleburyDataset", "Eth3dDataset", "Hdf5StereoDataset",
+           "InStereo2kDataset",
            "inspect_hdf5", "DatasetSpec",
            "build_dataset", "build_training_datasets", "build_loader", "build_benchmark_dataset",
            "BatchGeometricAugment", "GeometricAugmentConfig", "PhotometricAugment",

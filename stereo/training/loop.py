@@ -27,6 +27,7 @@ import torch.nn as nn
 from ..config import Config
 from ..data import (BatchGeometricAugment, DatasetMode, build_loader,
                     build_training_datasets)
+from ..data.registry import spec_name
 from ..losses import labels_from_batch
 from ..model import StereoNet
 from ..utils.checkpoint import save_checkpoint, load_checkpoint
@@ -150,9 +151,9 @@ class Trainer:
             val_dataset, _, _ = build_training_datasets(
                 [spec], DatasetMode.VALIDATION, cfg.data.resize, None,
                 seed=cfg.training.seed + 1, with_labels=True)
-            name = spec.type
+            name = spec_name(spec)
             if any(name == existing for existing, _, _ in val_loaders):
-                name = f"{spec.type}_{index}"
+                name = f"{name}_{index}"
             if len(val_dataset) == 0:
                 print(f"  {name:12s} nothing held out -- not validated")
                 continue

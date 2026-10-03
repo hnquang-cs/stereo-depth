@@ -23,6 +23,7 @@ from .augmentation import PhotometricAugmentConfig, ResizeConfig, build_train_tr
 from .base import DatasetMode, StereoDataset, collate_samples
 from .eth3d import Eth3dDataset
 from .hdf5_stereo import Hdf5StereoDataset, find_hdf5_files
+from .instereo2k import InStereo2kDataset
 from .kitti import KittiStereoDataset
 from .middlebury import MiddleburyDataset
 from .sceneflow import SceneFlowDataset
@@ -35,6 +36,7 @@ DATASET_TYPES = {
     "middlebury": MiddleburyDataset,
     "eth3d": Eth3dDataset,
     "hdf5": Hdf5StereoDataset,
+    "instereo2k": InStereo2kDataset,
 }
 
 
@@ -90,6 +92,11 @@ def resolve_container(spec: DatasetSpec) -> DatasetSpec:
     return spec
 
 
+def spec_name(spec: DatasetSpec) -> str:
+    """A short name for logs: the type, plus the version where there is one (kitti2015)."""
+    return f"{spec.type}{spec.options.get('version', '')}"
+
+
 def holdout_indices(dataset, fraction: float) -> List[int]:
     """The indices on the validation side of a train/validation division.
 
@@ -142,7 +149,7 @@ def build_training_datasets(specs: Sequence[DatasetSpec], mode: DatasetMode,
             dataset = Subset(dataset, range(max(1, spec.max_samples)))
         datasets.append(dataset)
         weights.append(spec.weight)
-        summary.append({"name": spec.type, "root": spec.root, "size": len(dataset),
+        summary.append({"name": spec_name(spec), "root": spec.root, "size": len(dataset),
                         "weight": spec.weight, "part": spec.part})
 
     if not datasets:

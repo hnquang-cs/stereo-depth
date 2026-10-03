@@ -93,8 +93,9 @@ def test_kitti_2015_benchmark_layout_still_works(tmp_path):
         handle.write(KITTI_CALIB)
 
     assert KittiStereoDataset(root, mode=DatasetMode.TRAIN).version == "2015"
-    # Training uses every frame; benchmarking only the labelled _10 reference frames.
-    assert len(KittiStereoDataset(root, mode=DatasetMode.TRAIN)) == 2
+    # Only _10 is labelled, and training is supervised, so both modes take only it.
+    assert len(KittiStereoDataset(root, mode=DatasetMode.TRAIN)) == 1
+    assert len(KittiStereoDataset(root, mode=DatasetMode.TRAIN, reference_frames_only=False)) == 2
     benchmark = KittiStereoDataset(root, mode=DatasetMode.BENCHMARK)
     assert len(benchmark) == 1
     assert float(benchmark[0]["disparity_gt"].mean()) == pytest.approx(6.0, abs=1e-2)

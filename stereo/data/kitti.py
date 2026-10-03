@@ -77,7 +77,7 @@ class KittiStereoDataset(StereoDataset):
         occlusion: ``"occ"`` (all pixels, the D1-all convention) or ``"noc"``.
             Benchmark layouts only.
         reference_frames_only: restrict to the ``_10`` frames that carry labels.
-            Defaults to ``True`` in ``BENCHMARK`` mode on a benchmark layout.
+            Defaults to ``True`` on a benchmark layout, in every mode.
     """
 
     def __init__(self, root: str, version: Optional[str] = None,
@@ -102,9 +102,10 @@ class KittiStereoDataset(StereoDataset):
                 f"middlebury2014 or eth3d.")
 
         if reference_frames_only is None:
-            # Only the benchmark splits label a single reference frame per scene.
-            reference_frames_only = (mode == DatasetMode.BENCHMARK
-                                     and self.version not in TRAINING_ONLY_LAYOUTS)
+            # The benchmark layouts label one frame per scene, _10. Training is
+            # supervised, so the unlabelled _11 frames are no use to it either:
+            # they would be half of KITTI's draws, with nothing to learn from.
+            reference_frames_only = self.version not in TRAINING_ONLY_LAYOUTS
 
         self.entries = self._index(reference_frames_only)
         if not self.entries:

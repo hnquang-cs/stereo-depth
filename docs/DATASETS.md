@@ -5,23 +5,48 @@ Every URL below was checked to resolve and serve the stated content. Sizes are t
 
 ## Attaching on Kaggle (what the notebook does)
 
-Training is supervised, so the notebook trains on the two labelled datasets, both
-**attached** as Kaggle inputs rather than downloaded — so Kaggle's 20 GB
-working-directory quota never applies:
+Training is supervised, so the notebook trains only on labelled data, all of it **attached**
+as Kaggle inputs. Nothing is downloaded in the GPU session, where a download would burn GPU
+quota for as long as it took:
 
-| Dataset | Kaggle | Role |
-|---|---|---|
-| FlyingThings3D | `kiraarsene/flying-things-3d` | **TRAIN split only**; TEST is the paper's Table IV benchmark, held out |
-| Middlebury | `minhanhtruong/middleburystereodataset` | training: every release with public ground truth |
+| Dataset | Source | Share | Role |
+|---|---|---|---|
+| FlyingThings3D | `kiraarsene/flying-things-3d` | 50% | **TRAIN split only**; TEST is the paper's Table IV benchmark, held out |
+| Middlebury | the prepared dataset | 25% | every release with public ground truth |
+| InStereo2K | the prepared dataset (from a manual download) | 15% | 2,000 indoor training pairs |
+| KITTI 2015, 2012 | the prepared dataset | 5% + 5% | the 200 + 194 labelled training pairs |
 
 ```python
-DATASETS = {"sceneflow": 0.75, "middlebury": 0.25}
-ATTACHED = {
-    "sceneflow":  "/kaggle/input/datasets/kiraarsene/flying-things-3d",
-    "middlebury": "/kaggle/input/datasets/minhanhtruong/middleburystereodataset",
-}
+DATASETS = {"sceneflow": 0.50, "middlebury": 0.25, "instereo2k": 0.15,
+            "kitti2015": 0.05, "kitti2012": 0.05}
 SCENEFLOW_SPLIT = "TRAIN"     # holds out the paper's evaluation split
 ```
+
+### The prepared dataset (made once)
+
+`notebooks/prepare_data.ipynb` runs `python -m stereo.data.prepare` on a **CPU** session
+(no GPU quota): it downloads Middlebury and KITTI from their official servers, takes only
+what has ground truth, shrinks the 3000 px 2014 and 1920 px 2021 scenes to at most 960 px,
+checks every release by warping, and writes about 1 GB. Saved as a private Kaggle dataset
+and attached, it is found by its `stereo_data_manifest.json`. Without it, Middlebury falls
+back to the `minhanhtruong/middleburystereodataset` mirror, and KITTI and InStereo2K are
+skipped.
+
+**InStereo2K cannot be downloaded by a script**: its only hosts are OneDrive and Baidu
+([official page](https://github.com/YuhuaXu/StereoDataset)). Fetch it once in a browser,
+upload it as a private Kaggle dataset with *instereo* in its name, and attach it to the
+preparation notebook, which finds it by that name, shrinks it from 1080 to 540 px and adds
+it to the prepared dataset.
+
+Its disparity is a 16-bit PNG of `disparity x 100` (0 = unknown) according to its README;
+torchvision's loader divides by 1024 instead, which torchvision's own issue tracker reports
+as a bug ([pytorch/vision#7129](https://github.com/pytorch/vision/issues/7129)). The
+preparation measures both on the real files and fails, naming the fix, if the README's
+scale is the wrong one.
+
+KITTI's 394 pairs are all its stereo benchmarks label: one frame (`_10`) per scene, with
+LiDAR ground truth (and, for 2015, fitted car models); the test sets' ground truth is
+private. Its other frames carry no labels, so training does not draw them.
 
 **Layout does not matter.** Every loader searches its attached directory for the pair of
 views at any nesting depth (`stereo/data/discovery.py`) and prints the real tree if it cannot:

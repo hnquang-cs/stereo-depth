@@ -80,6 +80,16 @@ def read_pfm(path: str) -> np.ndarray:
     return np.ascontiguousarray(data)
 
 
+def write_pfm(path: str, data: np.ndarray) -> None:
+    """Write a single-channel PFM as Middlebury does: little-endian, rows bottom-to-top."""
+    data = np.asarray(data, dtype="<f4")
+    if data.ndim != 2:
+        raise ValueError(f"expected a single-channel array, got shape {data.shape}")
+    with open(path, "wb") as handle:
+        handle.write(b"Pf\n%d %d\n-1.0\n" % (data.shape[1], data.shape[0]))
+        handle.write(np.ascontiguousarray(np.flipud(data)).tobytes())
+
+
 def read_kitti_disparity(path: str) -> Tuple[np.ndarray, np.ndarray]:
     """Read a KITTI 16-bit disparity PNG.
 
