@@ -75,19 +75,36 @@ class NsceLoss(nn.Module):
     ``downsample`` and the ground truth resampled to match.
     """
 
-    def __init__(self, lambda_: float = NSCE_LAMBDA):
+    def __init__(self, lambda_: float = NSCE_LAMBDA, normalize: bool = True,
+                 skip_zero_bin: bool = False):
+        """Args:
+            normalize: divide by ``log(D)``, the cross-entropy of a uniform
+                prediction, so the term reads ~1 when the cost volume knows
+                nothing. Convenient, but the PAPER does not do this and its 0.2
+                weight is tuned for the raw value -- so
+                :class:`~stereo.losses.PaperObjective` passes ``False``.
+            skip_zero_bin: exclude disparity 0 from the cross-entropy, as the
+                reference implementation does (``cost_volume[:, 1:]`` against
+                ``arange(1, max_disparity + 1)``). Disparity 0 is infinite depth
+                and is never the answer.
+        """
         super().__init__()
         self.lambda_ = lambda_
+        self.normalize = normalize
+        self.skip_zero_bin = skip_zero_bin
 
     def forward(self, cost: torch.Tensor, target: torch.Tensor, mask: torch.Tensor,
                 downsample: int) -> Dict[str, torch.Tensor]:
+        offset = 1 if self.skip_zero_bin else 0
+        if offset:
+            cost = cost[:, offset:]
         size = cost.shape[-2:]
         # Nearest, not bilinear: averaging disparity across a depth discontinuity
         # invents a value that is true nowhere, and the same for the mask.
         small_target = F.interpolate(target, size=size, mode="nearest") / downsample
         small_mask = F.interpolate(mask, size=size, mode="nearest")
 
-        candidates = torch.arange(cost.shape[1], dtype=cost.dtype,
+        candidates = torch.arange(offset, cost.shape[1] + offset, dtype=cost.dtype,
                                   device=cost.device).view(1, -1, 1, 1)
         laplacian = torch.softmax(-(candidates - small_target).abs() / self.lambda_, dim=1)
         log_probability = F.log_softmax(-cost, dim=1)
@@ -95,11 +112,13 @@ class NsceLoss(nn.Module):
 
         # Only where the true disparity is inside the search range; outside it the
         # Laplacian is truncated and the target is a fiction.
-        in_range = (small_target < cost.shape[1]).to(cost.dtype)
+        in_range = (small_target < cost.shape[1] + offset).to(cost.dtype)
         loss = masked_mean(cross_entropy, small_mask * in_range)
         # Normalised by log(D), the cross-entropy of a uniform prediction. The
         # term is then ~1 when the cost volume knows nothing and ~0 when it is
         # right, on the same scale as every other term, and the weight no longer
         # changes meaning when the search range does.
-        return {"loss": loss / math.log(max(cost.shape[1], 2)),
+        if self.normalize:
+            loss = loss / math.log(max(cost.shape[1], 2))
+        return {"loss": loss,
                 "in_range_ratio": (small_mask * in_range).sum() / small_mask.sum().clamp(min=1.0)}

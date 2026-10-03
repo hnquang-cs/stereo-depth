@@ -160,13 +160,15 @@ def test_supervised_losses_are_confined_to_one_module():
     unlabelled ones get the Monodepth terms. That is deliberate, so the old
     "no supervised loss exists anywhere" guard no longer applies. What still
     matters is that ground truth cannot leak in through some other loss, so it
-    is confined to stereo/losses/supervised.py and nothing else may name it.
+    is confined to the two declared supervised modules and nothing else may name
+    it.
     """
     import stereo.losses as losses
 
     loss_dir = os.path.dirname(losses.__file__)
     for filename in sorted(os.listdir(loss_dir)):
-        if not filename.endswith(".py") or filename in ("supervised.py", "__init__.py"):
+        if not filename.endswith(".py") or filename in ("supervised.py", "paper_objective.py",
+                                                        "__init__.py"):
             continue
         source = open(os.path.join(loss_dir, filename)).read()
         for token in ("disparity_gt", "depth_gt", "valid_gt_mask"):

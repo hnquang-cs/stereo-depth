@@ -49,7 +49,8 @@ AUDIT_TERMS = [
 #: Anything outside those places naming a ground-truth term is a leak, because it
 #: would mean a label reaching training by some route other than the declared one.
 SUPERVISED_ZONE = (
-    "stereo/losses/supervised.py",      # the only losses that read labels
+    "stereo/losses/supervised.py",      # the losses that read labels
+    "stereo/losses/paper_objective.py", # the paper's objective, which combines them
     "stereo/training/objective.py",     # the `labels` argument and nothing else
     "stereo/config.py",                 # the supervised / nsce weights
 )
