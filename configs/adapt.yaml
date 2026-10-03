@@ -51,16 +51,15 @@ data:
     aspect: [0.95, 1.05]
 
 loss:
-  photometric: 1.0
-  smoothness: 0.1
-  # 0.0 by default: measured to hurt monotonically (see LossWeights).
-  left_right: 0.0
-  confidence: 0.05
-  low_resolution: 0.5
+  # config_sceneflow.yaml from the reference implementation.
+  disparity: 100.0        # smooth-L1, std-mean scaled per sample, at BOTH scales
+  nsce: 0.2               # cost-volume cross-entropy, cost-volume scale only
+  smoothness: 20.0        # on the coarse disparity, cost-volume scale only
+  stdmean_scaled: true
 
 optimizer:
   name: adam
-  learning_rate: 0.00001
+  learning_rate: 0.001
   schedule: poly
   poly_exponent: 0.9
   warmup_iterations: 200

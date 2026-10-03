@@ -43,6 +43,24 @@ from .base import DISPARITY_KEYS, MASK_KEYS
 # --------------------------------------------------------------------------- #
 
 @dataclass
+class HorizontalFlipConfig:
+    """Random horizontal flip, as the paper's `random_horizontal_flip` does.
+
+    A stereo pair cannot simply be mirrored: flipping both views turns a
+    left-referenced pair into a right-referenced one, so the two views must also
+    be SWAPPED. Mirror and swap together, and the result is a valid pair whose
+    left-referenced disparity is the mirrored right disparity.
+
+    Without a right-view disparity to swap in, a labelled sample cannot be
+    flipped -- the mirrored left label is the wrong view's. So flipping applies
+    only where the dataset supplies ``disparity_gt_right``, and is skipped
+    otherwise rather than silently corrupting the target.
+    """
+    enabled: bool = True
+    probability: float = 0.5
+
+
+@dataclass
 class PhotometricAugmentConfig:
     enabled: bool = True
     brightness: float = 0.2
@@ -215,10 +233,13 @@ class Compose:
 
 def build_train_transform(resize: Optional[ResizeConfig],
                           photometric: Optional[PhotometricAugmentConfig],
-                          seed: Optional[int] = None) -> Optional[Compose]:
+                          seed: Optional[int] = None,
+                          flip: Optional[HorizontalFlipConfig] = None) -> Optional[Compose]:
     transforms: List[Any] = []
     if resize is not None:
         transforms.append(ResizeSample(resize))
+    if flip is not None and flip.enabled:
+        transforms.append(HorizontalFlip(flip, seed))
     if photometric is not None and photometric.enabled:
         transforms.append(PhotometricAugment(photometric, seed))
     else:
@@ -320,3 +341,34 @@ def _rescale_metadata(metadata: Dict[str, List[Any]], scale_x: float, scale_y: f
         if key in out and out[key] is not None:
             out[key] = [None if v is None else float(v) * factor for v in out[key]]
     return out
+
+
+class HorizontalFlip:
+    """Mirror a stereo pair AND swap its views."""
+
+    def __init__(self, config: HorizontalFlipConfig, seed: Optional[int] = None):
+        self.config = config
+        self.rng = random.Random(seed)
+
+    def __call__(self, sample: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+        if not self.config.enabled or self.rng.random() >= self.config.probability:
+            return sample
+        # A labelled sample needs the right view's disparity to become the new
+        # left label. Without it, flipping would train against the wrong view.
+        if "disparity_gt" in sample and "disparity_gt_right" not in sample:
+            return sample
+
+        mirror = lambda a: a[:, ::-1].copy() if isinstance(a, np.ndarray) and a.ndim >= 2 else a
+        out = dict(sample)
+        out["left"], out["right"] = mirror(sample["right"]), mirror(sample["left"])
+        for clean in ("left_clean", "right_clean"):
+            partner = "right_clean" if clean == "left_clean" else "left_clean"
+            if clean in sample and partner in sample:
+                out[clean] = mirror(sample[partner])
+        if "disparity_gt_right" in sample:
+            out["disparity_gt"] = mirror(sample["disparity_gt_right"])
+            out["disparity_gt_right"] = mirror(sample["disparity_gt"])
+        for mask in ("valid_gt_mask", "nonocc_mask"):
+            if mask in sample:
+                out[mask] = mirror(sample[mask])
+        return out

@@ -1,3 +1,4 @@
+from .augmentation import HorizontalFlip, HorizontalFlipConfig
 from .label_check import LabelScaleReport, check_label_scale
 from .calibration import DisparityRangeEstimate, calibrate_disparity_range
 from .augmentation import (BatchGeometricAugment, GeometricAugmentConfig, PhotometricAugment,
@@ -13,7 +14,7 @@ from .registry import (DatasetSpec, build_benchmark_dataset, build_dataset, buil
 from .sceneflow import SceneFlowDataset
 from .stereo_folder import StereoFolderDataset
 
-__all__ = ["check_label_scale", "LabelScaleReport", "calibrate_disparity_range", "DisparityRangeEstimate", "DatasetMode", "StereoDataset", "assert_label_free", "GROUND_TRUTH_KEYS",
+__all__ = ["HorizontalFlip", "HorizontalFlipConfig", "check_label_scale", "LabelScaleReport", "calibrate_disparity_range", "DisparityRangeEstimate", "DatasetMode", "StereoDataset", "assert_label_free", "GROUND_TRUTH_KEYS",
            "collate_samples", "metadata_tensor", "StereoFolderDataset", "SceneFlowDataset",
            "KittiStereoDataset", "MiddleburyDataset", "Eth3dDataset", "Hdf5StereoDataset",
            "inspect_hdf5", "DatasetSpec",

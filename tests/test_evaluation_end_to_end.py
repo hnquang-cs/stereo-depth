@@ -97,25 +97,33 @@ def test_full_pipeline_train_freeze_evaluate(synthetic_benchmark, tmp_path):
     written in the documented format.
     """
     from stereo.config import LossWeights
-    from stereo.training import LabelFreeObjective, ObjectiveState
+    from stereo.training import ObjectiveState, SupervisedObjective
     from stereo.utils.checkpoint import build_model_from_checkpoint, save_checkpoint
     from stereo.data import StereoFolderDataset
 
     torch.manual_seed(0)
-    # --- train, with a dataset that cannot return labels ------------------- #
+    # --- train, supervised ------------------------------------------------- #
+    # with_labels: TRAIN mode reads ground truth only when asked, so a run that
+    # does not want it still cannot see it.
     train_dataset = StereoFolderDataset(synthetic_benchmark, mode=DatasetMode.TRAIN)
-    assert "disparity_gt" not in train_dataset[0]
+    train_dataset.with_labels = True
+    assert "disparity_gt" in train_dataset[0]
+    assert "disparity_gt" not in StereoFolderDataset(synthetic_benchmark,
+                                                     mode=DatasetMode.TRAIN)[0]
     batch = collate_samples([train_dataset[i] for i in range(4)])
 
     model = StereoNet(StereoNetConfig.for_width(96, downsample=4, backbone_width=4,
                                                 feature_channels=4))
-    objective = LabelFreeObjective(LossWeights())
+    objective = SupervisedObjective(LossWeights())
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     images = {"left": batch["left"], "right": batch["right"]}
+    labels = {"disparity_gt": batch["disparity_gt"],
+              "valid_gt_mask": batch.get("valid_gt_mask",
+                                         torch.ones_like(batch["disparity_gt"]))}
     for _ in range(5):
-        outputs = model(batch["left"], batch["right"], directions=("left", "right"))
+        outputs = model(batch["left"], batch["right"], directions=("left",))
         loss = objective(outputs, images, ObjectiveState(warmup_scale=1.0),
-                         max_disparity=model.max_disparity)["loss"]
+                         labels=labels)["loss"]
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()

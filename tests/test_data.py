@@ -148,7 +148,7 @@ def test_config_rejects_unknown_keys(tmp_path):
 def test_shipped_configs_load():
     from stereo.config import load_config
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    for name in ("train_unlabeled.yaml", "adapt_unlabeled.yaml", "evaluate.yaml"):
+    for name in ("train.yaml", "adapt.yaml", "evaluate.yaml"):
         config = load_config(os.path.join(here, "configs", name))
         assert config.model.num_disparities % config.model.downsample == 0
 

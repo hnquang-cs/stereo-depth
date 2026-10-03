@@ -20,127 +20,51 @@ from .postprocess import PostProcessConfig
 
 @dataclass
 class LossWeights:
-    """Weights of the label-free objective.  There is no ground-truth term.
+    """The paper's supervised objective, from `mmstereo/config_sceneflow.yaml`.
 
-    **The default is label-free**: the Monodepth objective and nothing else.
-    Ground truth is not read during training at all, which
-    :func:`stereo.data.assert_label_free` enforces on every batch and
-    ``scripts/audit_label_leakage.py`` audits statically.
+        L = sum over both output scales of
+              disparity  * smooth-L1 (std-mean scaled, per sample)
+            + nsce       * NSCE                 (cost-volume scale only)
+            + smoothness * smoothness           (cost-volume scale only)
 
-    Supervised terms exist and are off. Setting ``supervised`` and ``nsce``
-    above 0 turns training semi-supervised: those terms are masked means over
-    labelled pixels, so labelled and unlabelled datasets mix freely in one batch
-    and a dataset without ground truth simply contributes nothing to them. That
-    also switches off the per-batch label-free assertion, deliberately. That is the
-    self-supervised half of what this package is: the paper's cost-volume
-    architecture (arXiv:2109.11644) trained by Monodepth's self-supervised
-    losses.
-
-    The remaining weights below are auxiliary regularisers, not part of
-    Monodepth. They default to 0.0 so the objective is exactly the three
-    Monodepth terms; turn them on deliberately.
-
-    The disparity-space terms (``left_right``, ``range_penalty``) are
-    applied to quantities **normalised by the disparity search range**, so these
-    weights mean the same thing at any resolution or disparity range. Without
-    that normalisation they are pixel-scale numbers being weighed against a
-    photometric residual in ``[0, 1]``, which is how a left-right weight of 0.5
-    ended up eight times stronger than the entire photometric signal and
-    collapsed training to a constant disparity field. It is also why Monodepth's
-    ``a_lr = 1`` transfers: its disparity is a fraction of image width.
+    Training is supervised: every term except smoothness reads ground truth, and
+    smoothness is a regulariser on the disparity field rather than a
+    self-supervised reconstruction term. See
+    :class:`~stereo.losses.PaperObjective` for the three details that come from
+    the reference implementation rather than from the paper's text.
     """
-
-    # -- the Monodepth objective ------------------------------------------- #
-    photometric: float = 1.0        #: a_ap
-    left_right: float = 1.0         #: a_lr, applied to (left-right error / max_disparity)
-    smoothness: float = 0.1         #: a_ds
-
-    # -- supervised, where a sample has a label ----------------------------- #
-    #: Smooth-L1 on the disparity. Applied as a masked mean over labelled pixels,
-    #: so a batch mixing labelled and unlabelled datasets needs no branching: an
-    #: unlabelled sample carries an all-zero mask and contributes nothing.
-    supervised: float = 0.0
-    #: The paper's NSCE term on the cost volume (arXiv:2005.08806, 0.05;
-    #: arXiv:2109.11644, 0.2). It needs ground truth, which is why the label-free
-    #: configuration omits it rather than substituting anything.
-    nsce: float = 0.0
-
-    # -- not part of the Monodepth objective; off unless enabled ------------- #
-    #: Label-free matchability target. Not from either paper.
-    confidence: float = 0.0
-    #: The photometric/smoothness terms repeated on the low-resolution
-    #: (soft-argmin) disparity -- the closest analogue of Monodepth's four-scale
-    #: sum, and the only other route by which the cost volume gets a gradient.
-    low_resolution: float = 0.0
-    #: Keeps predictions inside the search range.
-    range_penalty: float = 0.0
+    disparity: float = 100.0
+    nsce: float = 0.2
+    smoothness: float = 20.0
+    #: Divide each sample's disparity loss by ``mean + 2*std`` of its own ground
+    #: truth, so a frame of large disparities does not dominate a batch simply by
+    #: being closer to the camera. Measured: it cuts that imbalance from 19x to
+    #: 1.9x on frames that are equally wrong in relative terms.
+    stdmean_scaled: bool = True
 
     @property
     def uses_labels(self) -> bool:
-        """True when the objective has a term that reads ground truth."""
-        return bool(self.supervised or self.nsce)
-
-    def uses_labels_for(self, labels) -> bool:
-        """True when this batch has labels AND a term that would use them."""
-        return self.uses_labels and labels is not None and "disparity_gt" in labels
-
-    @classmethod
-    def monodepth(cls) -> "LossWeights":
-        """The Monodepth objective: photometric + left-right + smoothness only.
-
-        Godard et al. 2017, "Unsupervised Monocular Depth Estimation with
-        Left-Right Consistency", eq. 2:
-
-            C_s = a_ap (C_ap^l + C_ap^r) + a_ds (C_ds^l + C_ds^r)
-                                         + a_lr (C_lr^l + C_lr^r)
-
-        with ``a_ap = 1``, ``a_lr = 1``, ``a_ds = 0.1``, and the appearance term
-        itself 0.85 SSIM + 0.15 L1 -- which is already
-        :class:`~stereo.losses.PhotometricLoss`'s default.
-
-        ``a_lr = 1`` is only meaningful because Monodepth's disparity is a
-        *fraction of image width*, not a pixel count. This package's
-        disparity-space terms are normalised by the search range for exactly that
-        reason, so 1.0 here means what it means in the paper.
-
-        Everything not in the paper is switched off: the confidence target,
-        the low-resolution copy and the range penalty.
-
-        **This is the whole objective.** The paper's NSCE term is anchored on
-        ground-truth disparity and so has no label-free form; it is simply absent
-        rather than replaced. The cost volume is therefore trained only by the
-        gradient that reaches it back through the soft-argmin.
-
-        **Note.** Monodepth sums this over four output scales. The closest
-        analogue here is ``low_resolution``, which applies the photometric and
-        smoothness terms at cost-volume scale; it is 0.0 in this preset because
-        the paper's objective as usually quoted has three terms. Set it to 1.0
-        for a closer match to the paper's multi-scale behaviour.
-
-        """
-        return cls(photometric=1.0, left_right=1.0, smoothness=0.1,
-                   supervised=0.0, nsce=0.0, low_resolution=0.0, confidence=0.0,
-                   range_penalty=0.0)
-
+        """Training is supervised, so this is always true."""
+        return True
 
 
 @dataclass
 class OptimizerConfig:
     name: str = "adam"
-    learning_rate: float = 1e-4
+    learning_rate: float = 1e-3
     weight_decay: float = 0.0
     momentum: float = 0.9
     #: "poly", "cosine" or "none".
     schedule: str = "poly"
     poly_exponent: float = 0.9
-    warmup_iterations: int = 500
+    warmup_iterations: int = 0
     grad_clip: float = 1.0
 
 
 @dataclass
 class TrainingConfig:
-    epochs: int = 100
-    batch_size: int = 4
+    epochs: int = 20
+    batch_size: int = 16
     num_workers: int = 4
     use_amp: bool = True
     seed: int = 1234
@@ -155,7 +79,10 @@ class TrainingConfig:
     init_checkpoint: Optional[str] = None
     resume: Optional[str] = None
     #: Label-free validation criterion used for "best" checkpoint selection.
-    selection_metric: str = "val/photometric"
+    #: Checkpoint selection. Training is supervised, so end-point error on the
+    #: validation split is the honest criterion -- it is the quantity the
+    #: benchmark reports, measured on data the optimiser never saw.
+    selection_metric: str = "val/epe"
     max_steps_per_epoch: Optional[int] = None
     #: Batches per validation pass. Validation is a label-free proxy used only to
     #: pick a checkpoint, so it does not need the whole set -- and the notebook

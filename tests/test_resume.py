@@ -28,11 +28,16 @@ def dataset(tmp_path):
     root = tmp_path / "cam"
     (root / "left").mkdir(parents=True)
     (root / "right").mkdir(parents=True)
+    (root / "left_disparity").mkdir(parents=True)
     rng = np.random.default_rng(0)
+    shift = 4
     for index in range(4):
         texture = cv2.GaussianBlur((rng.random((48, 96, 3)) * 255).astype(np.uint8), (5, 5), 0)
         cv2.imwrite(str(root / "left" / f"{index}.png"), texture)
-        cv2.imwrite(str(root / "right" / f"{index}.png"), np.roll(texture, -4, axis=1))
+        cv2.imwrite(str(root / "right" / f"{index}.png"), np.roll(texture, -shift, axis=1))
+        # Training is supervised, so the fixture needs disparity.
+        cv2.imwrite(str(root / "left_disparity" / f"{index}.png"),
+                    np.full((48, 96), shift * 256, np.uint16))
     return str(root)
 
 

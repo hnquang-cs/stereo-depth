@@ -228,27 +228,6 @@ def test_uniform_batches_carry_no_mask():
     assert "valid_mask" not in collate_samples(samples)
 
 
-def test_padded_rows_do_not_contribute_to_the_objective():
-    """Replicated padding matches itself perfectly, so it must be excluded."""
-    from stereo.config import LossWeights
-    from stereo.training import LabelFreeObjective, ObjectiveState
-
-    torch.manual_seed(0)
-    net = StereoNet(StereoNetConfig(num_disparities=32)).eval()
-    left, right = torch.rand(1, 3, 128, 256), torch.rand(1, 3, 128, 256)
-    outputs = net(left, right, directions=("left", "right"))
-
-    mask = torch.ones(1, 1, 128, 256)
-    mask[..., 96:, :] = 0.0
-    objective = LabelFreeObjective(LossWeights())
-    common = dict(state=ObjectiveState(warmup_scale=1.0), max_disparity=100.0)
-    unmasked = objective(outputs, {"left": left, "right": right}, **common)
-    masked = objective(outputs, {"left": left, "right": right}, valid_mask=mask, **common)
-    assert float(masked["loss"]) != float(unmasked["loss"]), "the mask had no effect"
-    assert torch.isfinite(masked["loss"])
-
-
-# -- correlation aggregation ------------------------------------------------ #
 
 def test_correlation_aggregation_is_parameter_free_and_range_independent():
     """The property the conv2d aggregation cannot have.

@@ -98,3 +98,42 @@ def test_the_objective_actually_trains():
             first = result["logs"]["epe"]
         last = result["logs"]["epe"]
     assert last < first * 0.5, f"EPE did not fall: {first:.2f} -> {last:.2f}"
+
+
+# -- the paper's augmentation ----------------------------------------------- #
+
+def test_horizontal_flip_swaps_the_views_as_well_as_mirroring():
+    """Mirroring both views of a stereo pair turns a left-referenced pair into a
+    right-referenced one. The views must be swapped too, or the geometry is
+    inverted and the disparity sign is wrong."""
+    import numpy as np
+
+    from stereo.data import HorizontalFlip, HorizontalFlipConfig
+
+    flip = HorizontalFlip(HorizontalFlipConfig(probability=1.0), seed=0)
+    left = np.arange(12, dtype=np.float32).reshape(3, 4)
+    right = left + 100.0
+
+    out = flip({"left": left.copy(), "right": right.copy()})
+    assert np.allclose(out["left"], right[:, ::-1]), "the new left must be the mirrored RIGHT"
+    assert np.allclose(out["right"], left[:, ::-1])
+
+
+def test_horizontal_flip_refuses_a_labelled_pair_without_the_right_disparity():
+    """After the swap the new left label is the OLD RIGHT view's disparity. With
+    only a left label there is nothing correct to put there, so the sample is
+    left alone rather than trained against the wrong view."""
+    import numpy as np
+
+    from stereo.data import HorizontalFlip, HorizontalFlipConfig
+
+    flip = HorizontalFlip(HorizontalFlipConfig(probability=1.0), seed=0)
+    left = np.arange(12, dtype=np.float32).reshape(3, 4)
+    sample = {"left": left.copy(), "right": left + 100.0,
+              "disparity_gt": np.full((3, 4), 5.0, np.float32)}
+    assert np.allclose(flip(sample)["left"], left), "a left-only label must not be flipped"
+
+    sample["disparity_gt_right"] = np.full((3, 4), 7.0, np.float32)
+    flipped = flip(sample)
+    assert float(flipped["disparity_gt"].mean()) == 7.0
+    assert float(flipped["disparity_gt_right"].mean()) == 5.0

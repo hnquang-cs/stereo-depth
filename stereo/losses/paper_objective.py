@@ -123,9 +123,17 @@ class PaperObjective(nn.Module):
                 if bool(keep.any()) else float("nan")
 
         # -- cost-volume scale: disparity, smoothness, NSCE ------------------ #
+        small = outputs["disparity_small"]
         small_gt = downsample_disparity(disparity_gt, downsample)
         small_valid = downsample_disparity(valid_gt, downsample) > 0.0
-        small = outputs["disparity_small"]
+        # The model pads its input up to a multiple of its size divisor, so the
+        # coarse output can be a pixel or two wider than a plain max-pool of the
+        # ground truth. Match the model's grid; nearest, so no disparity is
+        # invented between two surfaces.
+        if small_gt.shape[-2:] != small.shape[-2:]:
+            small_gt = F.interpolate(small_gt, size=small.shape[-2:], mode="nearest")
+            small_valid = F.interpolate(small_valid.to(small_gt.dtype),
+                                        size=small.shape[-2:], mode="nearest") > 0.5
 
         loss, _ = self.disparity_loss(small, small_gt, small_valid.to(small.dtype))
         contribution = self.weights.disparity * loss
