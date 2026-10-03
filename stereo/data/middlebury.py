@@ -37,8 +37,12 @@ class MiddleburyDataset(StereoDataset):
 
     left_name = "im0.png"
     right_name = "im1.png"
-    disparity_name = "disp0GT.pfm"
     nonocc_name = "mask0nocc.png"
+    #: Left disparity, in preference order. The releases disagree: MiddEval3
+    #: ships ``disp0GT.pfm``, the 2014 full release ships ``disp0.pfm``, and
+    #: mirrors of either are common. Hard-coding one silently yields a dataset
+    #: with no labels, which supervised training can only report as unusable.
+    disparity_names = ("disp0GT.pfm", "disp0.pfm", "disp0-n.pfm", "disp0y.pfm")
 
     def __init__(self, root: str, mode: DatasetMode = DatasetMode.TRAIN, transform=None,
                  name: Optional[str] = None, scenes: Optional[List[str]] = None):
@@ -70,9 +74,19 @@ class MiddleburyDataset(StereoDataset):
             metadata.update(read_middlebury_calib(calib_path))
         return metadata
 
+    def _disparity_path(self, scene: str) -> str:
+        """The first disparity file this scene actually has."""
+        for name in self.disparity_names:
+            path = os.path.join(scene, name)
+            if os.path.isfile(path):
+                return path
+        raise FileNotFoundError(
+            f"no disparity in {scene}; looked for {', '.join(self.disparity_names)}. "
+            f"Present: {', '.join(sorted(os.listdir(scene))[:8])}")
+
     def _load_ground_truth(self, index: int) -> Dict[str, np.ndarray]:
         scene = self._scene_dir(index)
-        disparity, valid = read_middlebury_disparity(os.path.join(scene, self.disparity_name))
+        disparity, valid = read_middlebury_disparity(self._disparity_path(scene))
         ground_truth = {"disparity_gt": disparity, "valid_gt_mask": valid.astype(np.float32)}
 
         nonocc_path = os.path.join(scene, self.nonocc_name)

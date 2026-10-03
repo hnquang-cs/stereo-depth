@@ -66,3 +66,55 @@ def test_a_batch_may_mix_samples_with_and_without_labels():
     without = {"left": torch.rand(3, 64, 128), "right": torch.rand(3, 64, 128), "metadata": {}}
     batch = collate_samples([with_label, without, with_label])
     assert [float(batch["valid_gt_mask"][i].mean()) > 0 for i in range(3)] == [True, False, True]
+
+
+def test_middlebury_finds_disparity_under_either_release_naming(tmp_path):
+    """The releases disagree on the filename and a mirror may use either.
+
+    MiddEval3 ships disp0GT.pfm, the 2014 full release ships disp0.pfm.
+    Hard-coding one made a mirror of the other load with no labels at all, which
+    supervised training can only report as 'no disparity: unusable' -- a correct
+    message about an avoidable problem.
+    """
+    import cv2
+    import numpy as np
+
+    from stereo.data import DatasetMode, build_dataset
+    from stereo.data.registry import DatasetSpec
+
+    def write_scene(root, disparity_name):
+        scene = tmp_path / root / "Scene"
+        scene.mkdir(parents=True)
+        image = (np.random.default_rng(0).random((32, 48, 3)) * 255).astype(np.uint8)
+        cv2.imwrite(str(scene / "im0.png"), image)
+        cv2.imwrite(str(scene / "im1.png"), image)
+        with open(scene / disparity_name, "wb") as handle:
+            handle.write(b"Pf\n48 32\n-1.0\n")
+            handle.write(np.full((32, 48), 7.0, dtype="<f4")[::-1].tobytes())
+        return str(tmp_path / root)
+
+    for release, name in (("eval3", "disp0GT.pfm"), ("full2014", "disp0.pfm")):
+        root = write_scene(release, name)
+        dataset = build_dataset(DatasetSpec(type="middlebury", root=root),
+                                DatasetMode.TRAIN, None, with_labels=True)
+        assert "disparity_gt" in dataset[0], f"{name} was not found"
+
+
+def test_middlebury_says_what_it_looked_for_when_there_is_no_disparity(tmp_path):
+    import cv2
+    import numpy as np
+    import pytest
+
+    from stereo.data import DatasetMode, build_dataset
+    from stereo.data.registry import DatasetSpec
+
+    scene = tmp_path / "Scene"
+    scene.mkdir(parents=True)
+    image = (np.random.default_rng(0).random((32, 48, 3)) * 255).astype(np.uint8)
+    cv2.imwrite(str(scene / "im0.png"), image)
+    cv2.imwrite(str(scene / "im1.png"), image)
+
+    dataset = build_dataset(DatasetSpec(type="middlebury", root=str(tmp_path)),
+                            DatasetMode.BENCHMARK, None)
+    with pytest.raises(FileNotFoundError, match="disp0GT.pfm"):
+        dataset[0]
