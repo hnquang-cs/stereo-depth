@@ -1,16 +1,15 @@
-"""The training loop.  Plain PyTorch, one readable function per stage.
+"""The training loop. Plain PyTorch, one readable function per stage.
 
-There is no ground-truth tensor in this file.  ``assert_label_free`` is called on
-every batch, so a dataset that leaked labels would raise on the first iteration.
+Training is supervised, on the paper's objective and schedule: Adam at 1e-3 with
+polynomial decay, 20 epochs, batch 16, AMP. See
+:class:`~stereo.losses.PaperObjective` for the loss.
 
-Stages
-------
-Stage 1  photometric + smoothness + left-right consistency, from random init.
-Stage 3  identical code, started from a checkpoint with a smaller learning rate
-         (that is the only difference; see ``configs/adapt_unlabeled.yaml``).
+``train`` starts from random initialisation or a checkpoint; ``adapt`` is the
+same code with a smaller learning rate and your own data (see
+``configs/adapt.yaml``).
 
-Checkpoint selection uses a **label-free** criterion: the validation photometric
-reconstruction loss.  Ground-truth metrics are never consulted during training.
+Checkpoint selection uses validation EPE -- the quantity the benchmark reports,
+measured on data the optimiser never saw.
 """
 
 from __future__ import annotations
@@ -130,7 +129,7 @@ class Trainer:
         train_dataset, weights, summary = build_training_datasets(
             cfg.data.train, DatasetMode.TRAIN, cfg.data.resize,
             cfg.data.photometric_augmentation, seed=cfg.training.seed,
-            with_labels=True)
+            with_labels=True, flip=cfg.data.horizontal_flip)
         print("training datasets:")
         for entry in summary:
             print(f"  {entry['name']:12s} n={entry['size']:7d} weight={entry['weight']} root={entry['root']}")
@@ -181,7 +180,7 @@ class Trainer:
 
         Without this a resumed run writes a history.json containing only the new
         epochs, so the plotted curves restart at the resume point and the earlier
-        training appears to have vanished. Also recovers the best label-free
+        training appears to have vanished. Also recovers the best
         score, so resuming cannot overwrite a better checkpoint with a worse one.
         """
         path = os.path.join(self.config.training.output_dir, "history.json")
@@ -590,7 +589,6 @@ class Trainer:
             detail.append(f"labelled {100 * train_logs['labelled_ratio']:.0f}%")
         if val_logs:
             detail.append(f"val loss {val_logs.get('val/total', float('nan')):.4f}")
-            detail.append(f"val photo {val_logs.get('val/photometric', float('nan')):.4f}")
             if "val/epe" in val_logs:
                 detail.append(f"val epe {val_logs['val/epe']:.2f}px")
         print(f"           {'  '.join(detail)}")

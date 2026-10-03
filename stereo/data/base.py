@@ -5,7 +5,7 @@ Three modes, three different sample dictionaries
 ``DatasetMode.TRAIN`` and ``DatasetMode.VALIDATION``
     ``{"left", "right", "metadata"}`` -- images only.  A dataset in these modes
     never opens a ground-truth file.  ``VALIDATION`` differs from ``TRAIN`` only
-    in that augmentation is off; it is the *label-free* validation used for
+    in that augmentation is off; it is the validation split used for
     checkpoint selection.
 
 ``DatasetMode.BENCHMARK``

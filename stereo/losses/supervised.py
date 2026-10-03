@@ -68,7 +68,7 @@ class NsceLoss(nn.Module):
     disparity" but never "candidate k is the correct one".
 
     This is the paper's term, and it needs ground truth -- that is why the
-    label-free configuration has no equivalent and simply omits it.
+    objective, and the reason an unsupervised configuration has no equivalent.
 
     The cost volume is at ``1/downsample`` resolution and its bins are in
     ``downsample``-pixel units, so the target disparity is divided by

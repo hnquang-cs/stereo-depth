@@ -137,7 +137,7 @@ RECIPES: Dict[str, DatasetRecipe] = {
         protocol="sceneflow",
         description="Scene Flow FlyingThings3D, final pass. The paper's Table IV benchmark.",
         manual_note="45 GB of images plus 93 GB of disparity. Training here needs only the "
-                    "images (label-free), so the disparity archive is required ONLY for "
+                    "images, so the disparity archive is required for supervised "
                     "benchmarking. Download it separately, or skip it and train on images alone.",
     ),
 }

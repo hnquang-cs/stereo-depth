@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
-from .data.augmentation import GeometricAugmentConfig, PhotometricAugmentConfig, ResizeConfig
+from .data.augmentation import HorizontalFlipConfig, GeometricAugmentConfig, PhotometricAugmentConfig, ResizeConfig
 from .data.registry import DatasetSpec
 from .model.stereo_net import StereoNetConfig
 from .postprocess import PostProcessConfig
@@ -84,7 +84,7 @@ class TrainingConfig:
     #: benchmark reports, measured on data the optimiser never saw.
     selection_metric: str = "val/epe"
     max_steps_per_epoch: Optional[int] = None
-    #: Batches per validation pass. Validation is a label-free proxy used only to
+    #: Batches per validation pass. Validation chooses a checkpoint; it is not a
     #: pick a checkpoint, so it does not need the whole set -- and the notebook
     #: points it at the training mixture, which would be ~11700 batches an epoch.
     max_validation_steps: Optional[int] = 200
@@ -101,6 +101,10 @@ class DataConfig:
     resize: ResizeConfig = field(default_factory=ResizeConfig)
     photometric_augmentation: PhotometricAugmentConfig = field(default_factory=PhotometricAugmentConfig)
     geometric_augmentation: GeometricAugmentConfig = field(default_factory=GeometricAugmentConfig)
+    #: The paper's random_horizontal_flip. Mirrors a pair AND swaps its views,
+    #: because mirroring alone turns a left-referenced pair into a
+    #: right-referenced one and inverts the disparity sign.
+    horizontal_flip: HorizontalFlipConfig = field(default_factory=HorizontalFlipConfig)
 
 
 @dataclass

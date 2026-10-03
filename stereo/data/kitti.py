@@ -15,7 +15,8 @@ Three layouts, discovered structurally rather than assumed:
     <date>/calib_cam_to_cam.txt
 
 ``image_02`` and ``image_03`` are the rectified colour cameras, so they form a
-rectified stereo pair -- which is all label-free training needs. The raw
+rectified stereo pair, but no disparity, so it cannot be used for supervised
+training. The raw
 recordings carry no disparity ground truth (the Eigen protocol evaluates
 *depth* against projected LiDAR, a different benchmark the paper does not
 report), so this layout is training-only and says so if asked to benchmark.
@@ -97,7 +98,7 @@ class KittiStereoDataset(StereoDataset):
                 f"disparity benchmarking. (The Eigen protocol scores *depth* against projected "
                 f"LiDAR, a different benchmark, and the paper reports no KITTI accuracy at all "
                 f"-- only runtimes, in its Table III.)\n"
-                f"Use this dataset for label-free training, and benchmark on kitti2015, "
+                f"This layout has no disparity, so benchmark on kitti2015 instead, "
                 f"middlebury2014 or eth3d.")
 
         if reference_frames_only is None:

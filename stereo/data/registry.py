@@ -74,14 +74,16 @@ def build_dataset(spec: DatasetSpec, mode: DatasetMode, transform=None,
 def build_training_datasets(specs: Sequence[DatasetSpec], mode: DatasetMode,
                             resize: Optional[ResizeConfig],
                             photometric: Optional[PhotometricAugmentConfig],
-                            seed: int = 0, with_labels: bool = False):
+                            seed: int = 0, with_labels: bool = False,
+                            flip=None):
     """Build the enabled datasets plus the per-sample weights for weighted sampling.
 
     Returns ``(concat_dataset, sample_weights, summary)``.  ``sample_weights`` is
     ``None`` when only one dataset is enabled (a plain shuffle is then used).
     """
     if mode is DatasetMode.BENCHMARK:
-        raise ValueError("build_training_datasets is for label-free modes only")
+        raise ValueError("build_training_datasets builds TRAIN/VALIDATION datasets; "
+                         "use build_benchmark_dataset for BENCHMARK mode")
 
     datasets: List[Any] = []
     weights: List[float] = []
@@ -91,6 +93,7 @@ def build_training_datasets(specs: Sequence[DatasetSpec], mode: DatasetMode,
         if not spec.enabled:
             continue
         transform = build_train_transform(resize, photometric if mode is DatasetMode.TRAIN else None,
+                                      flip=flip if mode is DatasetMode.TRAIN else None,
                                           seed=seed + index)
         dataset = build_dataset(spec, mode, transform, with_labels)
         if spec.fraction < 1.0:

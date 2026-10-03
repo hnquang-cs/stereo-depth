@@ -118,8 +118,6 @@ def test_full_expectation_is_still_available():
     assert torch.allclose(soft_argmin(cost, window=None), expected, atol=1e-6)
 
 
-# -- the calibrator --------------------------------------------------------- #
-
 def _shifted_pair(width=640, height=256, shift=40, seed=0):
     """A textured pair with a known, exact horizontal shift."""
     generator = torch.Generator().manual_seed(seed)
@@ -127,42 +125,6 @@ def _shifted_pair(width=640, height=256, shift=40, seed=0):
     texture = F.avg_pool2d(texture, 3, stride=1, padding=1)  # give it local structure
     return texture[..., :width], texture[..., shift:shift + width]
 
-
-def test_calibration_recovers_a_known_disparity_without_ground_truth():
-    from stereo.data import calibrate_disparity_range
-
-    shift = 40
-    estimate = calibrate_disparity_range([_shifted_pair(shift=shift)], canonical_width=640,
-                                         search_fraction=0.4)
-    assert estimate.disparity_at_percentile == pytest.approx(shift, abs=8), str(estimate)
-    assert estimate.recommended >= shift, str(estimate)
-
-
-def test_calibration_recommends_a_usable_num_disparities():
-    from stereo.data import calibrate_disparity_range
-
-    estimate = calibrate_disparity_range([_shifted_pair(shift=24)], canonical_width=640,
-                                         search_fraction=0.4)
-    assert estimate.recommended % 4 == 0, "must be a multiple of the downsample factor"
-    assert 0 < estimate.recommended <= 640
-    assert 0.0 <= estimate.reliable_fraction <= 1.0
-
-
-def test_calibration_reads_only_the_two_views():
-    """Label-free: a sample carrying ground truth must give the same answer."""
-    from stereo.data import calibrate_disparity_range
-
-    left, right = _shifted_pair(shift=32)
-    plain = calibrate_disparity_range([{"left": left, "right": right}], canonical_width=640,
-                                      search_fraction=0.4)
-    poisoned = calibrate_disparity_range(
-        [{"left": left, "right": right,
-          "disparity": torch.full_like(left[:, :1], 999.0)}], canonical_width=640,
-        search_fraction=0.4)
-    assert plain.recommended == poisoned.recommended
-
-
-# -- evaluation ------------------------------------------------------------- #
 
 def test_evaluation_runs_at_the_canonical_width_not_the_benchmark_s_own():
     """A benchmark image is scored at its native size, but *run* at the canonical
@@ -226,7 +188,6 @@ def test_uniform_batches_carry_no_mask():
     samples = [{"left": torch.rand(3, 384, 640), "right": torch.rand(3, 384, 640), "metadata": {}}
                for _ in range(2)]
     assert "valid_mask" not in collate_samples(samples)
-
 
 
 def test_correlation_aggregation_is_parameter_free_and_range_independent():

@@ -1,4 +1,4 @@
-"""Label-free self-supervised stereo depth.
+"""Supervised stereo depth.
 
 A clean re-implementation of the stereo architecture from "A Learned Stereo
 Depth System for Robotic Manipulation in Homes" (Shankar et al.), trained
