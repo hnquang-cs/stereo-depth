@@ -51,12 +51,15 @@ AUDIT_TERMS = [
 SUPERVISED_ZONE = (
     "stereo/losses/supervised.py",      # the losses that read labels
     "stereo/losses/paper_objective.py", # the paper's objective, which combines them
+    "stereo/data/augmentation.py",      # transforms must carry labels with the images:
+                                        # a resize rescales disparity, a horizontal flip
+                                        # swaps the two views' labels
     "stereo/training/objective.py",     # the `labels` argument and nothing else
     "stereo/config.py",                 # the supervised / nsce weights
 )
 FORBIDDEN_ZONE = (
     "stereo/model/", "stereo/losses/", "stereo/training/",
-    "stereo/geometry.py", "stereo/data/augmentation.py",
+    "stereo/geometry.py",
     "stereo/utils/seed.py", "stereo/utils/checkpoint.py", "train.py",
 )
 #: Modules that name ground-truth terms precisely in order to EXCLUDE them:
