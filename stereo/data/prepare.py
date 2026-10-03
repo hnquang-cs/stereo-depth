@@ -20,6 +20,10 @@ What it writes under ``--out``, and why:
     kitti2015/training              the 200 + 194 frame pairs that have ground
     kitti2012/training              truth (frame _10); the archives' other frames
                                     are unlabelled or the test set
+    index_cache/                    the array listing of each HDF5 container under
+                                    --index-hdf5-under (FlyingThings3D): ten minutes
+                                    to build on Kaggle, which a GPU session would
+                                    otherwise spend every time it starts
     stereo_data_manifest.json       marks the directory; the notebook finds it
 
 Every release is then checked by warping (:func:`stereo.data.check_label_scale`),
@@ -58,6 +62,8 @@ MIDDEVAL3 = "https://vision.middlebury.edu/stereo/submit3/zip"
 KITTI = "https://s3.eu-central-1.amazonaws.com/avg-kitti"
 
 MANIFEST = "stereo_data_manifest.json"
+#: Index entries shipped with the data; the notebook points STEREO_INDEX_SEEDS here.
+INDEX_DIR = "index_cache"
 
 SCENES_2001 = ("sawtooth", "venus", "bull", "poster", "barn1", "barn2")
 #: 2005 withholds the ground truth of Computer, Drumsticks and Dwarves.
@@ -431,6 +437,30 @@ def verify(out: str) -> List[str]:
     return problems
 
 
+def prepare_index(out: str, search_root: str) -> List[str]:
+    """Ship the array listing of every HDF5 container under ``search_root``.
+
+    Listing the arrays of the 31.7 GB FlyingThings3D container took 596 s on
+    Kaggle's network mount, and a new session starts with an empty cache. Done
+    here, on CPU and once, a GPU session reads it instead (see
+    :mod:`stereo.data.index_cache`). Returns the containers indexed.
+    """
+    from .hdf5_stereo import find_hdf5_files, list_arrays
+    from .index_cache import entry_name
+
+    containers = find_hdf5_files(search_root) if os.path.isdir(search_root) else []
+    print(f"\nindex: {len(containers)} HDF5 container(s) under {search_root}")
+    target = os.path.join(out, INDEX_DIR)
+    for path in containers:
+        started = time.time()
+        rows = list_arrays(path)
+        os.makedirs(target, exist_ok=True)
+        with open(os.path.join(target, entry_name(path, "hdf5-arrays", {})), "w") as handle:
+            json.dump([[name, list(shape), dtype] for name, shape, dtype in rows], handle)
+        print(f"  {path}: {len(rows)} arrays listed in {time.time() - started:.0f}s")
+    return containers
+
+
 def directory_megabytes(path: str) -> float:
     return sum(os.path.getsize(os.path.join(directory, name))
                for directory, _, names in os.walk(path) for name in names) / 1e6
@@ -454,8 +484,12 @@ def find_prepared(search_root: str = "/kaggle/input", max_depth: int = 5) -> Opt
 
 def prepare_all(out: str, cache: Optional[str] = None, max_width: int = 960,
                 middlebury: bool = True, kitti: bool = True, workers: int = 6,
-                keep_cache: bool = False) -> str:
-    """Download, assemble and check everything; writes the manifest last."""
+                keep_cache: bool = False, index_hdf5_under: Optional[str] = None) -> str:
+    """Download, assemble and check everything; writes the manifest last.
+
+    ``index_hdf5_under`` is where to look for HDF5 containers to index (on
+    Kaggle, ``/kaggle/input``), or ``None`` to index none.
+    """
     out = os.path.abspath(out)
     cache = cache or os.path.join(tempfile.gettempdir(), "stereo-prepare-cache")
     if os.path.commonpath([out, os.path.abspath(cache)]) == out:
@@ -471,12 +505,14 @@ def prepare_all(out: str, cache: Optional[str] = None, max_width: int = 960,
     problems = verify(out)
     if problems:
         raise RuntimeError("the prepared data failed its checks:\n  " + "\n  ".join(problems))
+    indexed = prepare_index(out, index_hdf5_under) if index_hdf5_under else []
 
     contents = {name: round(directory_megabytes(os.path.join(out, name)), 1)
                 for name in ("middlebury", "kitti2015", "kitti2012")
                 if os.path.isdir(os.path.join(out, name))}
     with open(os.path.join(out, MANIFEST), "w") as handle:
         json.dump({"format": 1, "max_width": max_width, "megabytes": contents,
+                   "indexed": [os.path.basename(path) for path in indexed],
                    "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, handle, indent=2)
     if not keep_cache:
         shutil.rmtree(cache, ignore_errors=True)
@@ -497,6 +533,8 @@ def main() -> None:
     parser.add_argument("--skip-kitti", action="store_true")
     parser.add_argument("--workers", type=int, default=6, help="parallel Middlebury downloads")
     parser.add_argument("--keep-cache", action="store_true", help="keep the downloads afterwards")
+    parser.add_argument("--index-hdf5-under", help="ship the index of every HDF5 container "
+                                                   "under this directory (e.g. /kaggle/input)")
     parser.add_argument("--verify-only", action="store_true",
                         help="check an already prepared --out and exit")
     args = parser.parse_args()
@@ -505,7 +543,7 @@ def main() -> None:
         print("\n" + ("\n".join(problems) if problems else "all checks passed"))
         raise SystemExit(1 if problems else 0)
     prepare_all(args.out, args.cache, args.max_width, not args.skip_middlebury,
-                not args.skip_kitti, args.workers, args.keep_cache)
+                not args.skip_kitti, args.workers, args.keep_cache, args.index_hdf5_under)
 
 
 if __name__ == "__main__":

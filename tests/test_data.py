@@ -323,6 +323,41 @@ def test_index_cache_never_fails_the_build(tmp_path, monkeypatch):
     assert cached_index(str(tmp_path), "demo", {}, lambda: sentinel, quiet=True) is sentinel
 
 
+def test_an_index_shipped_in_a_seed_directory_serves_a_fresh_session(tmp_path, monkeypatch):
+    """A new Kaggle session starts with an empty cache, so the prepared dataset
+    ships the slow index and the session reads it instead of rebuilding it."""
+    import os
+
+    from stereo.data import index_cache
+    from stereo.data.index_cache import cached_index, entry_name
+
+    container = tmp_path / "mount_a" / "flying.hdf5"
+    container.parent.mkdir()
+    container.write_bytes(b"x" * 1000)
+    seeds = tmp_path / "prepared" / "index_cache"
+    seeds.mkdir(parents=True)
+    (seeds / entry_name(str(container), "demo", {})).write_text('["a", "b"]')
+
+    monkeypatch.setenv("STEREO_INDEX_CACHE", "off")
+    monkeypatch.setenv("STEREO_INDEX_SEEDS", str(seeds))
+    index_cache._MEMORY.clear()
+
+    def build():
+        raise AssertionError("rebuilt despite the shipped index")
+
+    assert cached_index(str(container), "demo", {}, build, quiet=True) == ["a", "b"]
+
+    # The same file mounted elsewhere, with another mtime, is still the same entry.
+    moved = tmp_path / "mount_b" / "flying.hdf5"
+    moved.parent.mkdir()
+    moved.write_bytes(b"x" * 1000)
+    os.utime(moved, (1, 1))
+    assert entry_name(str(moved), "demo", {}) == entry_name(str(container), "demo", {})
+    # Another file is not -- even one with the same name and the same size.
+    moved.write_bytes(b"y" + b"x" * 999)
+    assert entry_name(str(moved), "demo", {}) != entry_name(str(container), "demo", {})
+
+
 def test_keyed_disparity_lookup_is_constant_time_in_the_number_of_arrays():
     """It is called once per pair, so it must not scan every array name.
 

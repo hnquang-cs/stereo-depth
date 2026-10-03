@@ -25,8 +25,11 @@ SCENEFLOW_SPLIT = "TRAIN"     # holds out the paper's evaluation split
 `notebooks/prepare_data.ipynb` runs `python -m stereo.data.prepare` on a **CPU** session
 (no GPU quota): it downloads Middlebury and KITTI from their official servers, takes only
 what has ground truth, shrinks the 3000 px 2014 and 1920 px 2021 scenes to at most 960 px,
-checks every release by warping, and writes about 1 GB. Saved as a private Kaggle dataset
-and attached, it is found by its `stereo_data_manifest.json`. Without it, Middlebury falls
+checks every release by warping, and writes about 1 GB. With `kiraarsene/flying-things-3d`
+attached as well, it also lists that container's 189,000 arrays -- ten minutes on Kaggle's
+network mount -- and ships the listing in `index_cache/`, so a training session reads it
+instead of spending GPU time rebuilding it. Saved as a private Kaggle dataset and attached,
+it is found by its `stereo_data_manifest.json`. Without it, Middlebury falls
 back to the `minhanhtruong/middleburystereodataset` mirror and KITTI is skipped.
 
 KITTI's 394 pairs are all its stereo benchmarks label: one frame (`_10`) per scene, with

@@ -130,3 +130,33 @@ def test_a_segmented_download_reassembles_the_file_exactly(tmp_path):
     fetch_segmented(f"file://{tmp_path / 'source.bin'}", str(target), len(payload), segments=7)
     assert target.read_bytes() == payload
     assert not list(tmp_path.glob("copy.bin.part*"))
+
+
+def test_the_hdf5_index_is_shipped_and_read_in_a_fresh_session(tmp_path, monkeypatch):
+    """Listing FlyingThings3D's 189,000 arrays took ten minutes on Kaggle. The
+    preparation does it once; a later session must read it, not list again."""
+    h5py = pytest.importorskip("h5py")
+    import stereo.data.hdf5_stereo as hdf5_stereo
+    from stereo.data import index_cache
+    from stereo.data.prepare import INDEX_DIR, prepare_index
+
+    mount = tmp_path / "input" / "flying-things-3d"
+    mount.mkdir(parents=True)
+    with h5py.File(mount / "flying.hdf5", "w") as handle:
+        handle.create_dataset("left", data=np.zeros((2, 8, 8, 3), np.uint8))
+        handle.create_dataset("right", data=np.zeros((2, 8, 8, 3), np.uint8))
+    monkeypatch.setenv("STEREO_INDEX_CACHE", "off")
+    index_cache._MEMORY.clear()
+    out = tmp_path / "prepared"
+    assert prepare_index(str(out), str(tmp_path / "input")) == [str(mount / "flying.hdf5")]
+
+    index_cache._MEMORY.clear()                         # a new session
+    monkeypatch.setenv("STEREO_INDEX_SEEDS", str(out / INDEX_DIR))
+
+    def no_listing():
+        raise AssertionError("listed the container again")
+
+    monkeypatch.setattr(hdf5_stereo, "_require_h5py", no_listing)
+    rows = hdf5_stereo.list_arrays(str(mount / "flying.hdf5"))
+    assert sorted(name for name, _, _ in rows) == ["left", "right"]
+    assert rows[0][1] == (2, 8, 8, 3)
