@@ -60,10 +60,12 @@ def find_hdf5_files(root: str, max_depth: int = 6) -> List[str]:
     if os.path.isfile(root):
         return [root] if root.lower().endswith(HDF5_EXTENSIONS) else []
     found = []
-    for directory, _, filenames in os.walk(root):
+    for directory, subdirectories, filenames in os.walk(root):
         depth = os.path.relpath(directory, root).count(os.sep)
         if depth > max_depth:
             continue
+        if depth == max_depth and directory != root:
+            subdirectories[:] = []      # deeper files are skipped anyway; do not walk them
         found.extend(os.path.join(directory, name) for name in sorted(filenames)
                      if name.lower().endswith(HDF5_EXTENSIONS))
     return sorted(found)

@@ -5,21 +5,20 @@ Every URL below was checked to resolve and serve the stated content. Sizes are t
 
 ## Attaching on Kaggle (what the notebook does)
 
-The notebook trains on three datasets, all **attached** as Kaggle inputs rather than
-downloaded — so Kaggle's 20 GB working-directory quota never applies:
+Training is supervised, so the notebook trains on the two labelled datasets, both
+**attached** as Kaggle inputs rather than downloaded — so Kaggle's 20 GB
+working-directory quota never applies:
 
 | Dataset | Kaggle | Role |
 |---|---|---|
 | FlyingThings3D | `kiraarsene/flying-things-3d` | **TRAIN split only**; TEST is the paper's Table IV benchmark, held out |
-| KITTI Eigen split | `awsaf49/kitti-eigen-split-dataset` | training only — the paper reports no KITTI accuracy |
-| Middlebury | `minhanhtruong/middleburystereodataset` | training (the paper trains on the Middlebury training set) |
+| Middlebury | `minhanhtruong/middleburystereodataset` | training: every release with public ground truth |
 
 ```python
-DATASETS = {"sceneflow": 0.50, "kitti": 0.25, "middlebury": 0.25}
+DATASETS = {"sceneflow": 0.75, "middlebury": 0.25}
 ATTACHED = {
-    "sceneflow":  "/kaggle/input/flying-things-3d",
-    "kitti":      "/kaggle/input/kitti-eigen-split-dataset",
-    "middlebury": "/kaggle/input/middleburystereodataset",
+    "sceneflow":  "/kaggle/input/datasets/kiraarsene/flying-things-3d",
+    "middlebury": "/kaggle/input/datasets/minhanhtruong/middleburystereodataset",
 }
 SCENEFLOW_SPLIT = "TRAIN"     # holds out the paper's evaluation split
 ```
@@ -31,7 +30,34 @@ views at any nesting depth (`stereo/data/discovery.py`) and prints the real tree
 |---|---|
 | FlyingThings3D | `frames_finalpass\|frames_cleanpass/TRAIN/<A\|B\|C>/<scene>/left`, the flat `FlyingThings3D_subset` release, or bare `left`/`right` trees with no pass directory |
 | KITTI | raw / Eigen (`<date>/<date>_drive_NNNN_sync/image_02/data`), 2015 (`image_2`), 2012 (`colored_0`) |
-| Middlebury | any directory containing `im0.png` + `im1.png` |
+| FlyingThings3D, HDF5 | a single container holding every array; chosen automatically when the attached directory holds one |
+| Middlebury | every release, in any mix — see below |
+
+### Middlebury: one loader, seven layouts
+
+Each release names its files differently and stores disparity differently. Every rule
+below was checked on downloaded data by warping the right view with the converted label
+(`stereo.data.check_label_scale`); the notebook repeats that check per release on the
+attached mirror and drops a release that fails it.
+
+| Release | Views | Ground truth | To pixels |
+|---|---|---|---|
+| 2001 (6 scenes) | `im2.ppm`, `im6.ppm` | `disp2.pgm` | ÷ 8 |
+| 2003 (Cones, Teddy) | `im2`, `im6` (`.png` or `.ppm`) | `disp2.png` / `.pgm` | × width / 1800 (quarter ÷ 4, half ÷ 2, full ÷ 1; measured, only quarter is documented) |
+| 2005 (6 of 9 have GT), 2006 (21) | `view1.png`, `view5.png`, in the scene directory or `Illum1/Exp1` (2005), `Illum1/Exp2` (2006) | `disp1.png` | full ÷ 1, half ÷ 2, third ÷ 3 |
+| 2014 (23 with GT), 2021 (24) | `im0.png`, `im1.png` | `disp0.pfm` | as is |
+| MiddEval3 training | `im0.png`, `im1.png` | `disp0GT.pfm` (+ `mask0nocc.png`) | as is |
+
+- Value 0 (PNG/PGM) or `inf` (PFM) marks unknown disparity.
+- **Not disparity**, though named like it: 2014's `disp0y.pfm` (the *vertical* disparity of
+  the imperfect rectification), `disp0-n.pgm` (sample count) and `disp0-sd.pfm` (standard
+  deviation); 2021's `orig/disp0.pfm` (superseded).
+- 2005/2006 exposures differ by up to 9×; the release default is used, never the first found.
+- Skipped, with a count in the printed summary: scenes without public ground truth (the
+  MiddEval3 test set; 2005 Computer, Drumsticks, Dwarves), and extra copies of a scene
+  (Q/H/F sizes, 2014 perfect + imperfect, MiddEval3 and its source release). Of the copies,
+  the smallest at least `TRAIN_WIDTH` wide is used.
+- Not handled: the 2001 page's Tsukuba and Map, which use other file names and encodings.
 
 ### What the paper evaluates on
 

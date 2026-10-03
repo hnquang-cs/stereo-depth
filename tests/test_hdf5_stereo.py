@@ -190,3 +190,15 @@ def test_dataset_is_picklable_for_dataloader_workers(tmp_path):
     _ = dataset[0]                       # opens the handle
     restored = pickle.loads(pickle.dumps(dataset))
     assert restored[0]["left"].shape == (3, 32, 48)
+
+
+def test_a_sceneflow_spec_on_a_container_gets_the_hdf5_loader(tmp_path):
+    """Evaluation builds its dataset from the protocol's type, "sceneflow". A
+    mirror packaged as HDF5 must still get the loader that can read it."""
+    from stereo.data.registry import DatasetSpec, build_dataset
+
+    (tmp_path / "data").mkdir()
+    write_h5(tmp_path / "data" / "flying.hdf5", {"left": images(), "right": images()})
+    spec = DatasetSpec(type="sceneflow", root=str(tmp_path), options={"split": "TEST"})
+    dataset = build_dataset(spec, DatasetMode.TRAIN)
+    assert isinstance(dataset, Hdf5StereoDataset) and len(dataset) == 4

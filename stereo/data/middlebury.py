@@ -1,21 +1,42 @@
-"""Middlebury 2014 / MiddEval3 stereo.
+"""Middlebury stereo: every release on vision.middlebury.edu, and MiddEval3.
 
-Layout (one directory per scene)::
+The releases disagree on file names, on where the views sit and on how the
+disparity is stored, so a loader written for one finds nothing in another --
+or, worse, reads labels that are wrong by a constant factor:
 
-    root/<scene>/im0.png          left image
-                 im1.png          right image
-                 disp0GT.pfm      left ground-truth disparity (inf = invalid)
-                 mask0nocc.png    255 = non-occluded valid, 128 = occluded
-                 calib.txt        cam0/cam1/doffs/baseline/ndisp
+    release     left / right                disparity       to pixels
+    2001        im2.ppm      im6.ppm        disp2.pgm       / 8
+    2003        im2.png|ppm  im6.png|ppm    disp2.png|pgm   x width / 1800
+    2005, 2006  view1.png    view5.png      disp1.png       / 1, 2, 3 (full, half, third size)
+    2014, 2021  im0.png      im1.png        disp0.pfm       as is
+    MiddEval3   im0.png      im1.png        disp0GT.pfm     as is
 
-MiddEval3 ships resolution variants (``trainingF``/``trainingH``/``trainingQ``);
-point ``root`` at the one the protocol calls for.  The paper reports the
-**test** set through the official leaderboard, whose ground truth is not public;
-this loader therefore serves the *training* set, and the evaluation code labels
-the split accordingly.
+Each rule was confirmed on downloaded data: the right view, shifted by the
+converted label, reconstructs the left better than at any other scale (see
+:func:`stereo.data.check_label_scale`). The 2003 page documents only its
+quarter size; the half and full sizes were measured, and all three store the
+full-size disparity.
 
-Depth from disparity on Middlebury uses the dataset's own formula, which
-includes the principal-point offset::
+Files that look like disparity and are not:
+
+    disp0-n.pgm, disp0-sd.pfm   2014 perfect: sample count, standard deviation
+    disp0y.pfm                  2014 imperfect: the VERTICAL disparity
+    orig/disp0.pfm              2021: superseded by the scene's own disp0.pfm
+
+2005 and 2006 photograph each scene under 3 illuminations x 3 exposures. The
+release's default pair is Illum1/Exp1 for 2005 and Illum1/Exp2 for 2006 (the
+single-illumination archives move it up into the scene directory); the other
+exposures are as much as 9x darker.
+
+Scenes without public ground truth are skipped: the MiddEval3 test set, and
+Computer, Drumsticks and Dwarves of 2005. A scene present more than once -- in
+several sizes, as 2014 perfect and imperfect, or in both MiddEval3 and the
+release it came from -- is used once, from the smallest copy at least
+``min_width`` wide. Resized to the training width the copies are the same
+image, and the small one decodes many times faster.
+
+Depth from disparity uses the dataset's own formula, including the
+principal-point offset::
 
     Z = baseline * f / (d + doffs)
 """
@@ -23,89 +44,239 @@ includes the principal-point offset::
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional, Tuple
+import re
+from dataclasses import dataclass, replace
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+import cv2
 import numpy as np
 
 from .base import DatasetMode, StereoDataset
-from .discovery import describe_tree, find_view_file_pairs
-from .io import read_image, read_middlebury_calib, read_middlebury_disparity, read_nonocc_mask
+from .discovery import GROUND_TRUTH_DIR_NAMES, describe_tree, walk_dirs
+from .io import (image_width, read_image, read_middlebury_calib, read_middlebury_disparity,
+                 read_nonocc_mask)
+
+#: 2005 shares the 2006 layout but not its default exposure.
+SCENES_2005 = {"art", "books", "computer", "dolls", "drumsticks", "dwarves",
+               "laundry", "moebius", "reindeer"}
+#: 2021 shares the 2014 layout. Each scene is imaged from 1-3 viewpoints: artroom1, ...
+SCENES_2021 = {"artroom", "bandsaw", "chess", "curule", "ladder", "octogons",
+               "pendulum", "podium", "skates", "skiboots", "traproom"}
+#: 2003 comes in exactly these widths (quarter, half, full); 2001 is 430-435 wide.
+WIDTHS_2003 = (450, 900, 1800)
+
+RELEASES = ("2001", "2003", "2005", "2006", "2014", "2021", "MiddEval3")
+
+#: View pairs, to recognise a scene that has views but no ground truth.
+VIEW_PAIRS = (("im0.png", "im1.png"), ("im2.png", "im6.png"), ("im2.ppm", "im6.ppm"),
+              ("view1.png", "view5.png"))
+
+
+@dataclass(frozen=True)
+class Scene:
+    """One labelled stereo pair."""
+    release: str
+    left: str
+    right: str
+    disparity: str
+    width: int
+
+    @property
+    def directory(self) -> str:
+        return os.path.dirname(self.disparity)
+
+
+def pixels_per_unit(release: str, width: int) -> float:
+    """What one stored disparity unit is, in pixels, at this image width."""
+    if release == "2001":
+        return 1 / 8
+    if release == "2003":
+        return width / 1800
+    if release in ("2005", "2006"):        # full 1240-1396 wide, half 620-698, third 413-465
+        return 1.0 if width > 1000 else 1 / 2 if width > 550 else 1 / 3
+    return 1.0                             # PFM is in pixels
+
+
+def match_scene(directory: str, files: Sequence[str]) -> Optional[Scene]:
+    """The labelled scene ``directory`` holds, given the names of its files."""
+    files = set(files)
+    name = os.path.basename(directory).lower()
+
+    def scene(release: str, left: str, right: str, disparity: str) -> Scene:
+        left = os.path.join(directory, left)
+        return Scene(release, left, os.path.join(directory, right),
+                     os.path.join(directory, disparity), image_width(left))
+
+    if {"im0.png", "im1.png"} <= files:
+        if "disp0GT.pfm" in files:
+            return scene("MiddEval3", "im0.png", "im1.png", "disp0GT.pfm")
+        if "disp0.pfm" in files:
+            release = "2021" if name.rstrip("0123456789") in SCENES_2021 else "2014"
+            return scene(release, "im0.png", "im1.png", "disp0.pfm")
+
+    for image, disparity in ((".png", ".png"), (".ppm", ".pgm")):
+        if {"im2" + image, "im6" + image, "disp2" + disparity} <= files:
+            found = scene("2001", "im2" + image, "im6" + image, "disp2" + disparity)
+            return replace(found, release="2003") if found.width in WIDTHS_2003 else found
+
+    if "disp1.png" in files:
+        release = "2005" if name in SCENES_2005 else "2006"
+        for views in ("", "Illum1/Exp1" if release == "2005" else "Illum1/Exp2"):
+            left, right = os.path.join(views, "view1.png"), os.path.join(views, "view5.png")
+            if all(os.path.isfile(os.path.join(directory, v)) for v in (left, right)):
+                return scene(release, left, right, "disp1.png")
+    return None
+
+
+def scene_identity(scene: Scene) -> str:
+    """A name shared by every copy of one scene, across sizes and releases."""
+    name = os.path.basename(scene.directory).lower()
+    name = re.sub(r"-(im)?perfect$", "", name)                 # 2014
+    return re.sub(r"^(cones|teddy)[qhf]$", r"\1", name)        # 2003 per-size archives
+
+
+def pick_copy(copies: Sequence[Scene], min_width: int = 0) -> Scene:
+    """The smallest copy at least ``min_width`` wide, else the widest.
+
+    Ties go to 2014's perfect rectification over its imperfect one.
+    """
+    def rank(scene: Scene) -> Tuple[bool, int, bool, str]:
+        too_small = scene.width < min_width
+        return (too_small, -scene.width if too_small else scene.width,
+                scene.directory.lower().endswith("-imperfect"), scene.directory)
+
+    return min(copies, key=rank)
+
+
+def index_scenes(root: str, releases: Optional[Sequence[str]] = None,
+                 min_width: int = 0) -> Tuple[List[Scene], List[str], int]:
+    """Labelled scenes under ``root``, at any depth.
+
+    Mirrors wrap the scenes in extra folders (``MiddEval3/trainingQ/``,
+    ``ThirdSize/``, the dataset's own name), so scenes are found by their files
+    rather than by assuming where they sit.
+
+    Returns ``(scenes, unlabelled, duplicates)``: the scenes, one per identity;
+    the directories that have a view pair but no ground truth; and how many
+    extra copies were dropped.
+    """
+    wanted = set(releases or RELEASES)
+    unknown = wanted - set(RELEASES)
+    if unknown:
+        raise ValueError(f"unknown Middlebury release(s) {sorted(unknown)}; known: {RELEASES}")
+
+    copies: Dict[str, List[Scene]] = {}
+    unlabelled = []
+    for directory in walk_dirs(root, skip_names=GROUND_TRUTH_DIR_NAMES):
+        try:
+            with os.scandir(directory) as entries:
+                files = [entry.name for entry in entries if entry.is_file()]
+        except OSError:
+            continue
+        scene = match_scene(directory, files)
+        if scene is None:
+            in_exposure_dir = re.match(r"Exp\d+$", os.path.basename(directory))
+            if not in_exposure_dir and any({a, b} <= set(files) for a, b in VIEW_PAIRS):
+                unlabelled.append(os.path.relpath(directory, root))
+        elif scene.release in wanted:
+            copies.setdefault(scene_identity(scene), []).append(scene)
+
+    scenes = sorted((pick_copy(group, min_width) for group in copies.values()),
+                    key=lambda scene: scene.directory)
+    duplicates = sum(len(group) - 1 for group in copies.values())
+    return scenes, sorted(unlabelled), duplicates
 
 
 class MiddleburyDataset(StereoDataset):
-    """Middlebury-style scene directories (also used for ETH3D, which shares the layout)."""
+    """Middlebury scene directories, every release (and ETH3D, which shares the MiddEval3 layout)."""
 
-    left_name = "im0.png"
-    right_name = "im1.png"
     nonocc_name = "mask0nocc.png"
-    #: Left disparity, in preference order. The releases disagree: MiddEval3
-    #: ships ``disp0GT.pfm``, the 2014 full release ships ``disp0.pfm``, and
-    #: mirrors of either are common. Hard-coding one silently yields a dataset
-    #: with no labels, which supervised training can only report as unusable.
-    disparity_names = ("disp0GT.pfm", "disp0.pfm", "disp0-n.pfm", "disp0y.pfm")
 
     def __init__(self, root: str, mode: DatasetMode = DatasetMode.TRAIN, transform=None,
-                 name: Optional[str] = None, scenes: Optional[List[str]] = None):
+                 name: Optional[str] = None, scenes: Optional[List[str]] = None,
+                 releases: Optional[Sequence[str]] = None, min_width: int = 0):
+        """Args:
+            scenes: scene directories relative to ``root``, instead of searching.
+            releases: keep only these (see :data:`RELEASES`); ``None`` keeps all.
+            min_width: of several copies of a scene, use the smallest at least
+                this wide. Set it to the training width.
+        """
         super().__init__(mode=mode, transform=transform, name=name or "middlebury")
         self.root = root
-        self.scenes = scenes if scenes is not None else _index_scenes(root, self.left_name, self.right_name)
-        if not self.scenes:
-            raise RuntimeError(
-                f"no {self.name} scenes found under {root}.\n"
-                f"Looked for directories containing both {self.left_name} and "
-                f"{self.right_name}, at any depth.\n\n"
-                f"What is actually there:\n{describe_tree(root)}")
+        self.unlabelled: List[str] = []
+        self.duplicates = 0
+        if scenes is not None:
+            self.entries = [self._explicit_scene(scene) for scene in scenes]
+        else:
+            self.entries, self.unlabelled, self.duplicates = index_scenes(root, releases, min_width)
 
-    def _scene_dir(self, index: int) -> str:
-        return os.path.join(self.root, self.scenes[index])
+        if not self.entries:
+            skipped = (f"{len(self.unlabelled)} scene(s) have views but no ground truth, e.g. "
+                       f"{', '.join(self.unlabelled[:3])}.\n" if self.unlabelled else "")
+            raise RuntimeError(
+                f"no labelled {self.name} scenes under {root}"
+                + (f" for release(s) {', '.join(releases)}" if releases else "") + ".\n"
+                + skipped
+                + "Looked for, at any depth: im0.png + im1.png + disp0GT.pfm or disp0.pfm; "
+                  "im2 + im6 + disp2 (.png or .ppm/.pgm); "
+                  "view1.png + view5.png (or Illum1/Exp*/) + disp1.png.\n\n"
+                  f"What is actually there:\n{describe_tree(root)}")
+
+        self.releases: Dict[str, int] = {}
+        for scene in self.entries:
+            self.releases[scene.release] = self.releases.get(scene.release, 0) + 1
+
+    def _explicit_scene(self, relative: str) -> Scene:
+        directory = os.path.join(self.root, relative)
+        scene = match_scene(directory, os.listdir(directory))
+        if scene is None:
+            raise FileNotFoundError(f"{directory} is not a labelled Middlebury scene. "
+                                    f"Present: {', '.join(sorted(os.listdir(directory))[:8])}")
+        return scene
+
+    def summary(self) -> str:
+        """Scenes per release, and what was left out."""
+        parts = [", ".join(f"{release} {count}" for release, count in sorted(self.releases.items()))]
+        if self.unlabelled:
+            parts.append(f"{len(self.unlabelled)} without ground truth skipped")
+        if self.duplicates:
+            parts.append(f"{self.duplicates} duplicate copies skipped")
+        return "  |  ".join(parts)
 
     def _num_samples(self) -> int:
-        return len(self.scenes)
+        return len(self.entries)
 
     def _load_images(self, index: int) -> Tuple[np.ndarray, np.ndarray]:
-        scene = self._scene_dir(index)
-        return (read_image(os.path.join(scene, self.left_name)),
-                read_image(os.path.join(scene, self.right_name)))
+        scene = self.entries[index]
+        return read_image(scene.left), read_image(scene.right)
 
     def _sample_metadata(self, index: int) -> Dict[str, Any]:
-        metadata: Dict[str, Any] = {"sample_id": self.scenes[index]}
-        calib_path = os.path.join(self._scene_dir(index), "calib.txt")
+        scene = self.entries[index]
+        metadata: Dict[str, Any] = {"sample_id": os.path.relpath(scene.directory, self.root),
+                                    "release": scene.release}
+        calib_path = os.path.join(scene.directory, "calib.txt")
         if os.path.exists(calib_path):
             metadata.update(read_middlebury_calib(calib_path))
         return metadata
 
-    def _disparity_path(self, scene: str) -> str:
-        """The first disparity file this scene actually has."""
-        for name in self.disparity_names:
-            path = os.path.join(scene, name)
-            if os.path.isfile(path):
-                return path
-        raise FileNotFoundError(
-            f"no disparity in {scene}; looked for {', '.join(self.disparity_names)}. "
-            f"Present: {', '.join(sorted(os.listdir(scene))[:8])}")
-
     def _load_ground_truth(self, index: int) -> Dict[str, np.ndarray]:
-        scene = self._scene_dir(index)
-        disparity, valid = read_middlebury_disparity(self._disparity_path(scene))
-        ground_truth = {"disparity_gt": disparity, "valid_gt_mask": valid.astype(np.float32)}
+        scene = self.entries[index]
+        if scene.disparity.endswith(".pfm"):
+            disparity, valid = read_middlebury_disparity(scene.disparity)
+        else:
+            stored = cv2.imread(scene.disparity, cv2.IMREAD_UNCHANGED)
+            if stored is None:
+                raise FileNotFoundError(f"could not read disparity: {scene.disparity}")
+            if stored.ndim == 3:
+                stored = stored[..., 0]
+            valid = stored > 0                                     # 0 = unknown
+            disparity = stored.astype(np.float32)
+        disparity = disparity * pixels_per_unit(scene.release, disparity.shape[1])
+        ground_truth = {"disparity_gt": disparity.astype(np.float32),
+                        "valid_gt_mask": valid.astype(np.float32)}
 
-        nonocc_path = os.path.join(scene, self.nonocc_name)
+        nonocc_path = os.path.join(scene.directory, self.nonocc_name)
         if os.path.exists(nonocc_path):
             nonocc = read_nonocc_mask(nonocc_path)
             ground_truth["nonocc_mask"] = (nonocc & valid).astype(np.float32)
         return ground_truth
-
-
-def _index_scenes(root: str, left_name: str, right_name: str) -> List[str]:
-    """Scene directories, found at any depth.
-
-    Mirrors commonly wrap the scenes in extra folders (``MiddEval3/trainingH/``,
-    a resolution folder, or just the dataset's own name), so the scenes are
-    located by looking for the two view files rather than by assuming they sit
-    directly under ``root``. Paths are returned relative to ``root``.
-    """
-    if not os.path.isdir(root):
-        return []
-    scenes = [os.path.relpath(path, root)
-              for path in find_view_file_pairs(root, left_name, right_name)]
-    return sorted(scenes)

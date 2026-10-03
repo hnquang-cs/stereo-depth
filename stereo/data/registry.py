@@ -13,7 +13,7 @@ training mode physically cannot return ground truth (see :mod:`stereo.data.base`
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Sequence
 
 import torch
@@ -22,7 +22,7 @@ from torch.utils.data import ConcatDataset, DataLoader, Subset, WeightedRandomSa
 from .augmentation import PhotometricAugmentConfig, ResizeConfig, build_train_transform
 from .base import DatasetMode, StereoDataset, collate_samples
 from .eth3d import Eth3dDataset
-from .hdf5_stereo import Hdf5StereoDataset
+from .hdf5_stereo import Hdf5StereoDataset, find_hdf5_files
 from .kitti import KittiStereoDataset
 from .middlebury import MiddleburyDataset
 from .sceneflow import SceneFlowDataset
@@ -61,6 +61,7 @@ def build_dataset(spec: DatasetSpec, mode: DatasetMode, transform=None,
     ``with_labels`` asks a TRAIN/VALIDATION dataset to load ground truth as well,
     for supervised training. Datasets that have none simply return none.
     """
+    spec = resolve_container(spec)
     if spec.type not in DATASET_TYPES:
         raise ValueError(f"unknown dataset type {spec.type!r}; known types: {sorted(DATASET_TYPES)}")
     dataset_class = DATASET_TYPES[spec.type]
@@ -69,6 +70,19 @@ def build_dataset(spec: DatasetSpec, mode: DatasetMode, transform=None,
     # none of which would use it for anything but forwarding.
     dataset.with_labels = bool(with_labels)
     return dataset
+
+
+def resolve_container(spec: DatasetSpec) -> DatasetSpec:
+    """The spec to use for a Scene Flow mirror packaged as an HDF5 container.
+
+    Mirrors of FlyingThings3D ship either a tree of images or one container
+    holding every array, and the two need different loaders. Deciding here, from
+    the data, means training and evaluation cannot disagree about it.
+    """
+    if spec.type == "sceneflow" and spec.root and find_hdf5_files(spec.root, max_depth=2):
+        options = {"split": spec.options["split"]} if "split" in spec.options else {}
+        return replace(spec, type="hdf5", options=options)
+    return spec
 
 
 def build_training_datasets(specs: Sequence[DatasetSpec], mode: DatasetMode,

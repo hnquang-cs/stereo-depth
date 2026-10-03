@@ -192,6 +192,8 @@ def build_middlebury(root, scenes=("Adirondack", "Motorcycle"), prefix="", ndisp
         scene_dir = os.path.join(base, scene)
         _png(os.path.join(scene_dir, "im0.png"))
         _png(os.path.join(scene_dir, "im1.png"))
+        with open(os.path.join(scene_dir, "disp0.pfm"), "wb") as handle:
+            handle.write(b"Pf\n48 32\n-1.0\n" + np.full((32, 48), 6.0, dtype="<f4").tobytes())
         with open(os.path.join(scene_dir, "calib.txt"), "w") as handle:
             handle.write(f"cam0=[1758 0 977; 0 1758 552; 0 0 1]\nbaseline=111\n"
                          f"doffs=0\nndisp={ndisp}\n")

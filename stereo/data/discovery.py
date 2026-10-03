@@ -11,7 +11,8 @@ Two shapes cover every dataset here:
 
 * a directory holding two *view directories* (``left``/``right``,
   ``image_02``/``image_03``, ``image_2``/``image_3``, ``colored_0``/``colored_1``)
-* a directory holding two *view files* (Middlebury's ``im0.png``/``im1.png``)
+* a directory holding two *view files*, as Middlebury does (see
+  :mod:`stereo.data.middlebury`, whose releases each name them differently)
 """
 
 from __future__ import annotations
@@ -158,17 +159,6 @@ def describe_missing_stereo(root: str) -> str:
     if len(unpaired) > 3:
         lines.append(f"    ... and {len(unpaired) - 3} more")
     return "\n".join(lines)
-
-
-def find_view_file_pairs(root: str, left_name: str, right_name: str,
-                         max_depth: int = MAX_SEARCH_DEPTH) -> List[str]:
-    """Every directory under ``root`` holding both named image files (Middlebury scenes)."""
-    found = []
-    for current in walk_dirs(root, max_depth, GROUND_TRUTH_DIR_NAMES):
-        if (os.path.isfile(os.path.join(current, left_name))
-                and os.path.isfile(os.path.join(current, right_name))):
-            found.append(current)
-    return sorted(found)
 
 
 def paired_filenames(left_dir: str, right_dir: str) -> List[str]:

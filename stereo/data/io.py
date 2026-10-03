@@ -30,6 +30,24 @@ def read_image(path: str) -> np.ndarray:
     return image.astype(np.float32) / 255.0
 
 
+def image_width(path: str) -> int:
+    """An image's width, from the PNG or PPM/PGM header when possible.
+
+    Indexing needs widths for every scene, and decoding a 3000-pixel PNG to
+    learn its width costs a tenth of a second.
+    """
+    with open(path, "rb") as handle:
+        head = handle.read(512)
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return int.from_bytes(head[16:20], "big")
+    if head[:1] == b"P" and head[1:2] in (b"2", b"3", b"5", b"6"):
+        return int(re.sub(rb"#[^\n]*", b" ", head[2:]).split()[0])
+    image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    if image is None:
+        raise FileNotFoundError(f"could not read image: {path}")
+    return image.shape[1]
+
+
 def read_pfm(path: str) -> np.ndarray:
     """Read a PFM file as float32, top-to-bottom, shape ``(H, W)`` or ``(H, W, 3)``.
 

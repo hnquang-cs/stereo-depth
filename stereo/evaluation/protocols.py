@@ -125,6 +125,9 @@ PROTOCOLS: Dict[str, EvaluationProtocol] = {
         max_disparity_source="Middlebury SDK scores every finite ground-truth pixel",
         evaluate_nonocc=True,
         depth_metrics=False,
+        # MiddEval3 is the benchmark Table V comes from, and the only release
+        # with the mask0nocc.png that the nonocc metrics need.
+        dataset_options={"releases": ["MiddEval3"]},
         notes="The paper's Table V is the hidden TEST split via the official leaderboard. "
               "This protocol scores the public TRAINING split, so it is NOT directly "
               "comparable to the published row.",

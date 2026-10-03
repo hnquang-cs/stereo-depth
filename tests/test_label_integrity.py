@@ -114,7 +114,7 @@ def test_middlebury_says_what_it_looked_for_when_there_is_no_disparity(tmp_path)
     cv2.imwrite(str(scene / "im0.png"), image)
     cv2.imwrite(str(scene / "im1.png"), image)
 
-    dataset = build_dataset(DatasetSpec(type="middlebury", root=str(tmp_path)),
-                            DatasetMode.BENCHMARK, None)
-    with pytest.raises(FileNotFoundError, match="disp0GT.pfm"):
-        dataset[0]
+    with pytest.raises(RuntimeError, match="views but no ground truth") as error:
+        build_dataset(DatasetSpec(type="middlebury", root=str(tmp_path)),
+                      DatasetMode.BENCHMARK, None)
+    assert "disp0GT.pfm" in str(error.value)
