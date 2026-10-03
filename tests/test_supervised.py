@@ -211,3 +211,41 @@ def test_the_default_objective_reads_no_labels_at_all():
     logs = _objective_run(weights, labels)["logs"]
     for key in ("supervised", "epe", "nsce", "labelled_ratio"):
         assert key not in logs, f"{key} reported by a label-free objective"
+
+
+# -- label integrity -------------------------------------------------------- #
+
+def _labelled_pair(shift=8.0, size=(64, 128), scale_labels=1.0):
+    """A pair whose left view IS the right view shifted by `shift`."""
+    import torch.nn.functional as F
+
+    from stereo.geometry import warp_right_to_left
+
+    torch.manual_seed(0)
+    right = F.avg_pool2d(torch.rand(1, 3, *size), 3, stride=1, padding=1)
+    disparity = torch.full((1, 1, *size), shift)
+    left, valid = warp_right_to_left(right, disparity)
+    return {"left": left[0], "right": right[0],
+            "disparity_gt": (disparity * scale_labels)[0],
+            "valid_gt_mask": valid[0]}
+
+
+def test_label_scale_check_accepts_consistent_labels():
+    from stereo.data import check_label_scale
+
+    report = check_label_scale([_labelled_pair() for _ in range(3)])
+    assert report.consistent and report.best_factor == 1.0, str(report)
+
+
+def test_label_scale_check_catches_a_mirror_that_forgot_to_rescale():
+    """The failure it exists for: images resized, disparity copied through.
+
+    Labels wrong by a constant factor are silent -- supervised training fits them
+    and the model looks broken instead of the data.
+    """
+    from stereo.data import check_label_scale
+
+    # Labels 4x too large, as if the images were shrunk 4x and disparity was not.
+    report = check_label_scale([_labelled_pair(shift=8.0, scale_labels=4.0) for _ in range(3)])
+    assert not report.consistent
+    assert report.best_factor == pytest.approx(0.25, rel=0.4), str(report)
