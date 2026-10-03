@@ -78,15 +78,13 @@ class TrainingConfig:
     #: Resume / initialise from this checkpoint (Stage 3 adaptation).
     init_checkpoint: Optional[str] = None
     resume: Optional[str] = None
-    #: Label-free validation criterion used for "best" checkpoint selection.
     #: Checkpoint selection. Training is supervised, so end-point error on the
-    #: validation split is the honest criterion -- it is the quantity the
+    #: held-out validation parts is the honest criterion -- the quantity the
     #: benchmark reports, measured on data the optimiser never saw.
     selection_metric: str = "val/epe"
     max_steps_per_epoch: Optional[int] = None
-    #: Batches per validation pass. Validation chooses a checkpoint; it is not a
-    #: pick a checkpoint, so it does not need the whole set -- and the notebook
-    #: points it at the training mixture, which would be ~11700 batches an epoch.
+    #: Batches per validation pass, per dataset. Validation picks a checkpoint;
+    #: it is not a benchmark, so it does not need a large set.
     max_validation_steps: Optional[int] = 200
     #: Save a left/right/disparity figure every N epochs (0 disables).
     visualize_every: int = 5

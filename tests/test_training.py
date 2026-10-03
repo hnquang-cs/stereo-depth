@@ -19,12 +19,13 @@ def tiny_model(width=96):
 
 
 # --------------------------------------------------------------------------- #
-# EMA teacher
+# A full run
 # --------------------------------------------------------------------------- #
 
 
-def test_trainer_runs_an_epoch_on_an_unlabeled_folder(unlabeled_dataset, tmp_path):
-    """A full Trainer epoch, including validation and checkpointing, with no labels."""
+def test_trainer_trains_and_validates_on_disjoint_parts(labelled_dataset, tmp_path):
+    """A full Trainer run -- training, validation on a held-out part of the same
+    dataset, checkpoint selection -- on a small labelled folder."""
     from stereo.data.augmentation import GeometricAugmentConfig, PhotometricAugmentConfig, ResizeConfig
     from stereo.data.registry import DatasetSpec
     from stereo.training import Trainer
@@ -32,8 +33,10 @@ def test_trainer_runs_an_epoch_on_an_unlabeled_folder(unlabeled_dataset, tmp_pat
     config = Config()
     config.model = StereoNetConfig.for_width(96, downsample=4, backbone_width=4, feature_channels=4)
     config.dynamic_disparity = False
-    config.data.train = [DatasetSpec(type="folder", root=unlabeled_dataset)]
-    config.data.validation = [DatasetSpec(type="folder", root=unlabeled_dataset)]
+    config.data.train = [DatasetSpec(type="folder", root=labelled_dataset, part="train",
+                                     val_fraction=1 / 3)]
+    config.data.validation = [DatasetSpec(type="folder", root=labelled_dataset, part="val",
+                                          val_fraction=1 / 3)]
     config.data.resize = ResizeConfig(height=48, width=96)
     config.data.photometric_augmentation = PhotometricAugmentConfig(enabled=True)
     config.data.geometric_augmentation = GeometricAugmentConfig(enabled=True, scale=(0.9, 1.1),
@@ -51,10 +54,11 @@ def test_trainer_runs_an_epoch_on_an_unlabeled_folder(unlabeled_dataset, tmp_pat
 
     assert len(trainer.history) == 2
     assert np.isfinite(trainer.history[-1]["train/total"])
-    assert "val/epe" in trainer.history[-1]
+    assert "val/epe" in trainer.history[-1] and "val/folder/epe" in trainer.history[-1]
+    assert [len(loader.dataset) for _, loader, _ in trainer.val_loaders] == [2]
 
     payload = torch.load(best, map_location="cpu", weights_only=False)
-    assert payload["extra"]["selection_is_label_free"] is True
+    assert payload["extra"]["selection_metric"] == "val/epe"
     assert payload["model_config"]["num_disparities"] == 48
 
 

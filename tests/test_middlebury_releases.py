@@ -43,21 +43,24 @@ def _scene(directory, left, right, disparity, width, stored):
     _disparity(str(directory / disparity), width, stored)
 
 
-@pytest.mark.parametrize("release, scene, left, right, disparity, width, stored, pixels", [
-    ("2001", "sawtooth", "im2.ppm", "im6.ppm", "disp2.pgm", 434, 80, 10.0),
-    ("2003", "cones", "im2.png", "im6.png", "disp2.png", 450, 100, 25.0),
-    ("2003", "conesH", "im2.ppm", "im6.ppm", "disp2.pgm", 900, 100, 50.0),
-    ("2003", "conesF", "im2.ppm", "im6.ppm", "disp2.pgm", 1800, 100, 100.0),
-    ("2005", "Art", "view1.png", "view5.png", "disp1.png", 463, 60, 20.0),
-    ("2006", "Aloe", "view1.png", "view5.png", "disp1.png", 641, 60, 30.0),
-    ("2006", "Aloe", "view1.png", "view5.png", "disp1.png", 1282, 60, 60.0),
-    ("2014", "Adirondack-perfect", "im0.png", "im1.png", "disp0.pfm", 64, 7.5, 7.5),
-    ("2021", "artroom1", "im0.png", "im1.png", "disp0.pfm", 64, 7.5, 7.5),
-    ("MiddEval3", "Adirondack", "im0.png", "im1.png", "disp0GT.pfm", 64, 7.5, 7.5),
+@pytest.mark.parametrize("release, scene, left, right, disparity, disparity_right, width, stored, "
+                         "pixels", [
+    ("2001", "sawtooth", "im2.ppm", "im6.ppm", "disp2.pgm", "disp6.pgm", 434, 80, 10.0),
+    ("2003", "cones", "im2.png", "im6.png", "disp2.png", "disp6.png", 450, 100, 25.0),
+    ("2003", "conesH", "im2.ppm", "im6.ppm", "disp2.pgm", "disp6.pgm", 900, 100, 50.0),
+    ("2003", "conesF", "im2.ppm", "im6.ppm", "disp2.pgm", "disp6.pgm", 1800, 100, 100.0),
+    ("2005", "Art", "view1.png", "view5.png", "disp1.png", "disp5.png", 463, 60, 20.0),
+    ("2006", "Aloe", "view1.png", "view5.png", "disp1.png", "disp5.png", 641, 60, 30.0),
+    ("2006", "Aloe", "view1.png", "view5.png", "disp1.png", "disp5.png", 1282, 60, 60.0),
+    ("2014", "Adirondack-perfect", "im0.png", "im1.png", "disp0.pfm", "disp1.pfm", 64, 7.5, 7.5),
+    ("2021", "artroom1", "im0.png", "im1.png", "disp0.pfm", "disp1.pfm", 64, 7.5, 7.5),
+    ("MiddEval3", "Adirondack", "im0.png", "im1.png", "disp0GT.pfm", "disp1GT.pfm", 64, 7.5, 7.5),
 ])
 def test_each_release_is_read_in_pixels(tmp_path, release, scene, left, right, disparity,
-                                        width, stored, pixels):
-    _scene(tmp_path / "mirror" / scene, left, right, disparity, width, stored)
+                                        disparity_right, width, stored, pixels):
+    directory = tmp_path / "mirror" / scene
+    _scene(directory, left, right, disparity, width, stored)
+    _disparity(str(directory / disparity_right), width, stored * 1.1)
     dataset = MiddleburyDataset(str(tmp_path), mode=DatasetMode.BENCHMARK)
     assert dataset.releases == {release: 1}
 
@@ -67,6 +70,13 @@ def test_each_release_is_read_in_pixels(tmp_path, release, scene, left, right, d
     assert float(sample["valid_gt_mask"][0, 0, 0]) == 0.0       # the unknown pixel
     assert float(sample["valid_gt_mask"][0, 1:, :].min()) == 1.0
     assert sample["metadata"]["release"] == release
+    assert "disparity_gt_right" not in sample                   # only training flips
+
+    training = MiddleburyDataset(str(tmp_path), mode=DatasetMode.TRAIN)
+    training.with_labels = True
+    sample = training[0]
+    assert float(sample["disparity_gt_right"][0, 1, 1]) == pytest.approx(pixels * 1.1, rel=1e-3)
+    assert float(sample["valid_gt_mask_right"][0, 0, 0]) == 0.0
 
 
 @pytest.mark.parametrize("scene, default", [("Art", 1), ("Aloe", 2)])
@@ -151,3 +161,42 @@ def test_image_width_reads_the_header(tmp_path):
         assert image_width(str(tmp_path / name)) == 37
     (tmp_path / "commented.ppm").write_bytes(b"P6\n# made by 99 tools\n37 5\n255\n" + bytes(555))
     assert image_width(str(tmp_path / "commented.ppm")) == 37
+
+
+def test_validation_holds_out_whole_scene_groups(tmp_path):
+    """Copies of a scene, MiddEval3's variants of it and numbered siblings share
+    geometry; a division that split them would validate on trained geometry."""
+    families = [("Piano", "PianoL"), ("Motorcycle", "MotorcycleE"), ("Playtable", "PlaytableP"),
+                ("Cloth1", "Cloth2", "Cloth3"), ("artroom1", "artroom2")]
+    singles = ["Adirondack", "Jadeplant", "Pipes", "Recycle", "Vintage", "Shelves", "Teddy"]
+    for name in [n for family in families for n in family] + singles:
+        _scene(tmp_path / "MiddEval3" / name, "im0.png", "im1.png", "disp0GT.pfm", 64, 5.0)
+    dataset = MiddleburyDataset(str(tmp_path))
+
+    for fraction in (0.1, 0.3, 0.5, 0.8):
+        held = {os.path.basename(dataset.entries[i].directory)
+                for i in dataset.holdout_indices(fraction)}
+        assert 0 < len(held) < len(dataset)
+        for family in families:
+            assert len(held & set(family)) in (0, len(family)), (fraction, family, held)
+
+
+def test_adding_a_release_moves_no_scene_across(tmp_path):
+    """The side is a hash of the scene's own group, not of its rank among others."""
+    eval3 = ["Adirondack", "Jadeplant", "Pipes", "Recycle", "Vintage", "Shelves", "Motorcycle"]
+    for name in eval3:
+        _scene(tmp_path / "MiddEval3" / name, "im0.png", "im1.png", "disp0GT.pfm", 64, 5.0)
+
+    def held(dataset):
+        return {os.path.basename(dataset.entries[i].directory) for i in dataset.holdout_indices(0.5)}
+
+    before = held(MiddleburyDataset(str(tmp_path)))
+    for name in ("Art", "Books", "Dolls", "Laundry", "Moebius", "Reindeer"):
+        _scene(tmp_path / "2005" / name, "view1.png", "view5.png", "disp1.png", 463, 60)
+    assert held(MiddleburyDataset(str(tmp_path))) & set(eval3) == before
+
+
+def test_a_single_scene_group_holds_nothing_out(tmp_path):
+    for name in ("Piano", "PianoL"):
+        _scene(tmp_path / name, "im0.png", "im1.png", "disp0GT.pfm", 64, 5.0)
+    assert MiddleburyDataset(str(tmp_path)).holdout_indices(0.5) == []

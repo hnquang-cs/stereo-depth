@@ -40,13 +40,13 @@ below was checked on downloaded data by warping the right view with the converte
 (`stereo.data.check_label_scale`); the notebook repeats that check per release on the
 attached mirror and drops a release that fails it.
 
-| Release | Views | Ground truth | To pixels |
+| Release | Views | Ground truth: left, right | To pixels |
 |---|---|---|---|
-| 2001 (6 scenes) | `im2.ppm`, `im6.ppm` | `disp2.pgm` | ÷ 8 |
-| 2003 (Cones, Teddy) | `im2`, `im6` (`.png` or `.ppm`) | `disp2.png` / `.pgm` | × width / 1800 (quarter ÷ 4, half ÷ 2, full ÷ 1; measured, only quarter is documented) |
-| 2005 (6 of 9 have GT), 2006 (21) | `view1.png`, `view5.png`, in the scene directory or `Illum1/Exp1` (2005), `Illum1/Exp2` (2006) | `disp1.png` | full ÷ 1, half ÷ 2, third ÷ 3 |
-| 2014 (23 with GT), 2021 (24) | `im0.png`, `im1.png` | `disp0.pfm` | as is |
-| MiddEval3 training | `im0.png`, `im1.png` | `disp0GT.pfm` (+ `mask0nocc.png`) | as is |
+| 2001 (6 scenes) | `im2.ppm`, `im6.ppm` | `disp2.pgm`, `disp6.pgm` | ÷ 8 |
+| 2003 (Cones, Teddy) | `im2`, `im6` (`.png` or `.ppm`) | `disp2`, `disp6` (`.png` / `.pgm`) | × width / 1800 (quarter ÷ 4, half ÷ 2, full ÷ 1; measured, only quarter is documented) |
+| 2005 (6 of 9 have GT), 2006 (21) | `view1.png`, `view5.png`, in the scene directory or `Illum1/Exp1` (2005), `Illum1/Exp2` (2006) | `disp1.png`, `disp5.png` | full ÷ 1, half ÷ 2, third ÷ 3 |
+| 2014 (23 with GT), 2021 (24) | `im0.png`, `im1.png` | `disp0.pfm`, `disp1.pfm` | as is |
+| MiddEval3 training | `im0.png`, `im1.png` | `disp0GT.pfm` (+ `mask0nocc.png`), `disp1GT.pfm` (archive `MiddEval3-GT1-*.zip`) | as is |
 
 - Value 0 (PNG/PGM) or `inf` (PFM) marks unknown disparity.
 - **Not disparity**, though named like it: 2014's `disp0y.pfm` (the *vertical* disparity of
@@ -58,6 +58,33 @@ attached mirror and drops a release that fails it.
   (Q/H/F sizes, 2014 perfect + imperfect, MiddEval3 and its source release). Of the copies,
   the smallest at least `TRAIN_WIDTH` wide is used.
 - Not handled: the 2001 page's Tsukuba and Map, which use other file names and encodings.
+
+### Horizontal flip and the right view's disparity
+
+The paper flips stereo pairs horizontally. A flip must also swap the views, so the
+flipped pair's left label is the old **right** view's disparity, mirrored, and its valid
+mask is the right view's (the two views' unknown regions differ by up to 13% of pixels).
+A labelled pair without right-view disparity is therefore never flipped. Training loads
+the right view's disparity where the data has it: every Middlebury release and the
+FlyingThings3D image tree (`disparity/.../right/*.pfm`). The `kiraarsene/flying-things-3d`
+HDF5 container has only `disp` (the left view), so its pairs are not flipped; the
+notebook prints, per dataset, whether the flip applies.
+
+### Validation
+
+Validation scores a held-out part of each training dataset, never trained on, so the
+checkpoint is chosen by generalisation rather than fit (`VAL_FRACTION` in the notebook):
+
+- **Middlebury**: whole scene groups, about 10% of them. Copies of a scene, MiddEval3's
+  variants of it (`Piano`/`PianoL`, `Motorcycle`/`MotorcycleE`, ...) and numbered siblings
+  (`Cloth1-4`, 2021's `artroom1`/`artroom2`) stay on one side. A stable hash of the group
+  decides, so the held-out scenes do not change between runs. The notebook lists them.
+- **FlyingThings3D**: the last 2% of the TRAIN split, as one contiguous block, so a
+  sequence's nearly identical neighbouring frames stay together. TEST stays untouched
+  for the paper's Table IV comparison.
+
+Each dataset is scored separately in a fixed order (`val/<dataset>/epe`), and `val/epe`
+-- the checkpoint criterion -- is their mean weighted as in training.
 
 ### What the paper evaluates on
 

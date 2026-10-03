@@ -205,3 +205,16 @@ def test_containing_directory_names_do_not_influence_selection(tmp_path):
     assert layout.subset == "Monkaa"
     # And the genuine finalpass directory still wins on its own name.
     assert layout.pass_name == "frames_finalpass"
+
+
+def test_training_loads_the_right_view_disparity_for_the_flip(tmp_path):
+    """FlyingThings3D ships both views' disparity. The right one is what lets the
+    paper's horizontal flip apply to a labelled pair; nothing else needs it."""
+    root = build(str(tmp_path), ["TRAIN/A/0000"])
+    training = SceneFlowDataset(root, split="TRAIN", mode=DatasetMode.TRAIN)
+    training.with_labels = True
+    sample = training[0]
+    assert float(sample["disparity_gt_right"].mean()) == pytest.approx(7.0)
+    assert float(sample["valid_gt_mask_right"].mean()) == 1.0
+    benchmark = SceneFlowDataset(root, split="TRAIN", mode=DatasetMode.BENCHMARK)
+    assert "disparity_gt_right" not in benchmark[0]

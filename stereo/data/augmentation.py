@@ -365,10 +365,18 @@ class HorizontalFlip:
             partner = "right_clean" if clean == "left_clean" else "left_clean"
             if clean in sample and partner in sample:
                 out[clean] = mirror(sample[partner])
+        # Labels swap with their views. The masks must swap too: the two views'
+        # unknown regions differ, and the left mask on the right label would
+        # mark unknown pixels as known.
         if "disparity_gt_right" in sample:
             out["disparity_gt"] = mirror(sample["disparity_gt_right"])
             out["disparity_gt_right"] = mirror(sample["disparity_gt"])
-        for mask in ("valid_gt_mask", "nonocc_mask"):
-            if mask in sample:
-                out[mask] = mirror(sample[mask])
+            right_valid = sample.get("valid_gt_mask_right")
+            if right_valid is None:
+                right_valid = (sample["disparity_gt_right"] > 0).astype(np.float32)
+            if "valid_gt_mask" in sample:
+                out["valid_gt_mask_right"] = mirror(sample["valid_gt_mask"])
+            out["valid_gt_mask"] = mirror(right_valid)
+        # Describes the old left view, and has no right-view partner to swap in.
+        out.pop("nonocc_mask", None)
         return out

@@ -81,10 +81,11 @@ ALLOWED_ZONE = (
 #: Reading a metric out of a logs dict is not reading a label -- the value was
 #: already computed inside the objective, which is in the supervised zone. The
 #: training loop prints these, so the pattern is exempted narrowly (a dict lookup
-#: or membership test keyed by the metric name) rather than by exempting the file.
+#: or membership test keyed by the metric name, possibly an f-string such as
+#: ``val_logs[f"val/{name}/epe"]``) rather than by exempting the file.
 LOG_ACCESS = re.compile(
-    r"""(?:logs|train_logs|val_logs|averages)(?:\.get)?\s*[\[(]\s*["']([\w/]+)["']"""
-    r"""|["']([\w/]+)["']\s+in\s+(?:logs|train_logs|val_logs|averages)""")
+    r"""(?:logs|train_logs|val_logs|averages)(?:\.get)?\s*[\[(]\s*f?["']([\w/{}]+)["']"""
+    r"""|f?["']([\w/{}]+)["']\s+in\s+(?:logs|train_logs|val_logs|averages)""")
 
 FORBIDDEN_IMPORTS = ("from ..evaluation", "from stereo.evaluation", "import stereo.evaluation",
                      "from .evaluation import")

@@ -4,12 +4,16 @@ The releases disagree on file names, on where the views sit and on how the
 disparity is stored, so a loader written for one finds nothing in another --
 or, worse, reads labels that are wrong by a constant factor:
 
-    release     left / right                disparity       to pixels
-    2001        im2.ppm      im6.ppm        disp2.pgm       / 8
-    2003        im2.png|ppm  im6.png|ppm    disp2.png|pgm   x width / 1800
-    2005, 2006  view1.png    view5.png      disp1.png       / 1, 2, 3 (full, half, third size)
-    2014, 2021  im0.png      im1.png        disp0.pfm       as is
-    MiddEval3   im0.png      im1.png        disp0GT.pfm     as is
+    release     left / right                disparity: left, right        to pixels
+    2001        im2.ppm      im6.ppm        disp2.pgm      disp6.pgm      / 8
+    2003        im2.png|ppm  im6.png|ppm    disp2.png|pgm  disp6.png|pgm  x width / 1800
+    2005, 2006  view1.png    view5.png      disp1.png      disp5.png      / 1, 2, 3 (full, half, third size)
+    2014, 2021  im0.png      im1.png        disp0.pfm      disp1.pfm      as is
+    MiddEval3   im0.png      im1.png        disp0GT.pfm    disp1GT.pfm    as is
+
+The right view's disparity is what makes the horizontal flip possible: a
+flipped pair's left view is the old right view, mirrored. It is loaded in
+training only, the one mode that flips.
 
 Each rule was confirmed on downloaded data: the right view, shifted by the
 converted label, reconstructs the left better than at any other scale (see
@@ -45,6 +49,7 @@ from __future__ import annotations
 
 import os
 import re
+import zlib
 from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -80,6 +85,7 @@ class Scene:
     right: str
     disparity: str
     width: int
+    disparity_right: Optional[str] = None
 
     @property
     def directory(self) -> str:
@@ -102,21 +108,23 @@ def match_scene(directory: str, files: Sequence[str]) -> Optional[Scene]:
     files = set(files)
     name = os.path.basename(directory).lower()
 
-    def scene(release: str, left: str, right: str, disparity: str) -> Scene:
+    def scene(release: str, left: str, right: str, disparity: str, disparity_right: str) -> Scene:
         left = os.path.join(directory, left)
         return Scene(release, left, os.path.join(directory, right),
-                     os.path.join(directory, disparity), image_width(left))
+                     os.path.join(directory, disparity), image_width(left),
+                     os.path.join(directory, disparity_right) if disparity_right in files else None)
 
     if {"im0.png", "im1.png"} <= files:
         if "disp0GT.pfm" in files:
-            return scene("MiddEval3", "im0.png", "im1.png", "disp0GT.pfm")
+            return scene("MiddEval3", "im0.png", "im1.png", "disp0GT.pfm", "disp1GT.pfm")
         if "disp0.pfm" in files:
             release = "2021" if name.rstrip("0123456789") in SCENES_2021 else "2014"
-            return scene(release, "im0.png", "im1.png", "disp0.pfm")
+            return scene(release, "im0.png", "im1.png", "disp0.pfm", "disp1.pfm")
 
     for image, disparity in ((".png", ".png"), (".ppm", ".pgm")):
         if {"im2" + image, "im6" + image, "disp2" + disparity} <= files:
-            found = scene("2001", "im2" + image, "im6" + image, "disp2" + disparity)
+            found = scene("2001", "im2" + image, "im6" + image, "disp2" + disparity,
+                          "disp6" + disparity)
             return replace(found, release="2003") if found.width in WIDTHS_2003 else found
 
     if "disp1.png" in files:
@@ -124,7 +132,7 @@ def match_scene(directory: str, files: Sequence[str]) -> Optional[Scene]:
         for views in ("", "Illum1/Exp1" if release == "2005" else "Illum1/Exp2"):
             left, right = os.path.join(views, "view1.png"), os.path.join(views, "view5.png")
             if all(os.path.isfile(os.path.join(directory, v)) for v in (left, right)):
-                return scene(release, left, right, "disp1.png")
+                return scene(release, left, right, "disp1.png", "disp5.png")
     return None
 
 
@@ -133,6 +141,23 @@ def scene_identity(scene: Scene) -> str:
     name = os.path.basename(scene.directory).lower()
     name = re.sub(r"-(im)?perfect$", "", name)                 # 2014
     return re.sub(r"^(cones|teddy)[qhf]$", r"\1", name)        # 2003 per-size archives
+
+
+#: MiddEval3 entries that re-use another scene with its right view changed:
+#: exposure (E), lighting (L), or rectified perfectly (P).
+MIDDEVAL3_VARIANTS = {"artl": "art", "motorcyclee": "motorcycle", "pianol": "piano",
+                      "playtablep": "playtable"}
+
+
+def scene_group(scene: Scene) -> str:
+    """Scenes sharing geometry, which a train/validation division keeps on one side.
+
+    Copies of a scene, MiddEval3's variants of it, and numbered siblings: 2021
+    images each scene from up to 3 viewpoints (artroom1, artroom2), and the
+    numbered sets of other years (Cloth1-4) share objects and materials.
+    """
+    name = scene_identity(scene)
+    return MIDDEVAL3_VARIANTS.get(name, name).rstrip("0123456789")
 
 
 def pick_copy(copies: Sequence[Scene], min_width: int = 0) -> Scene:
@@ -243,6 +268,25 @@ class MiddleburyDataset(StereoDataset):
             parts.append(f"{self.duplicates} duplicate copies skipped")
         return "  |  ".join(parts)
 
+    def holdout_indices(self, fraction: float) -> List[int]:
+        """Indices on the validation side of a division by :func:`scene_group`.
+
+        A stable hash of the group decides its side, so adding or dropping a
+        release moves no other scene across, and a resumed run validates on the
+        same scenes. A set so small that no group falls under ``fraction`` holds
+        out one group regardless, and at least one is always left to train on.
+        """
+        groups = sorted({scene_group(scene) for scene in self.entries})
+        if len(groups) < 2:
+            return []
+        share = {group: zlib.crc32(group.encode()) / 2 ** 32 for group in groups}
+        held = {group for group in groups if share[group] < fraction}
+        if not held:                                   # a small set: hold out one
+            held = {min(groups, key=share.get)}
+        if len(held) == len(groups):                   # and train on at least one
+            held.discard(max(held, key=share.get))
+        return [i for i, scene in enumerate(self.entries) if scene_group(scene) in held]
+
     def _num_samples(self) -> int:
         return len(self.entries)
 
@@ -261,22 +305,31 @@ class MiddleburyDataset(StereoDataset):
 
     def _load_ground_truth(self, index: int) -> Dict[str, np.ndarray]:
         scene = self.entries[index]
-        if scene.disparity.endswith(".pfm"):
-            disparity, valid = read_middlebury_disparity(scene.disparity)
-        else:
-            stored = cv2.imread(scene.disparity, cv2.IMREAD_UNCHANGED)
-            if stored is None:
-                raise FileNotFoundError(f"could not read disparity: {scene.disparity}")
-            if stored.ndim == 3:
-                stored = stored[..., 0]
-            valid = stored > 0                                     # 0 = unknown
-            disparity = stored.astype(np.float32)
-        disparity = disparity * pixels_per_unit(scene.release, disparity.shape[1])
-        ground_truth = {"disparity_gt": disparity.astype(np.float32),
-                        "valid_gt_mask": valid.astype(np.float32)}
+        disparity, valid = read_scene_disparity(scene, scene.disparity)
+        ground_truth = {"disparity_gt": disparity, "valid_gt_mask": valid.astype(np.float32)}
+        if self.mode is DatasetMode.TRAIN and scene.disparity_right:
+            right, right_valid = read_scene_disparity(scene, scene.disparity_right)
+            ground_truth["disparity_gt_right"] = right
+            ground_truth["valid_gt_mask_right"] = right_valid.astype(np.float32)
 
         nonocc_path = os.path.join(scene.directory, self.nonocc_name)
         if os.path.exists(nonocc_path):
             nonocc = read_nonocc_mask(nonocc_path)
             ground_truth["nonocc_mask"] = (nonocc & valid).astype(np.float32)
         return ground_truth
+
+
+def read_scene_disparity(scene: Scene, path: str) -> Tuple[np.ndarray, np.ndarray]:
+    """A disparity file of ``scene`` in pixels, and where it is known."""
+    if path.endswith(".pfm"):
+        disparity, valid = read_middlebury_disparity(path)
+    else:
+        stored = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+        if stored is None:
+            raise FileNotFoundError(f"could not read disparity: {path}")
+        if stored.ndim == 3:
+            stored = stored[..., 0]
+        valid = stored > 0                                         # 0 = unknown
+        disparity = stored.astype(np.float32)
+    scale = pixels_per_unit(scene.release, disparity.shape[1])
+    return (disparity * scale).astype(np.float32), valid

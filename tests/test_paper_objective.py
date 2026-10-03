@@ -137,3 +137,33 @@ def test_horizontal_flip_refuses_a_labelled_pair_without_the_right_disparity():
     flipped = flip(sample)
     assert float(flipped["disparity_gt"].mean()) == 7.0
     assert float(flipped["disparity_gt_right"].mean()) == 5.0
+
+
+def test_horizontal_flip_swaps_the_valid_masks_with_the_labels():
+    """The two views' unknown regions differ -- on up to 13% of pixels in
+    Middlebury 2021 -- so the new left label needs the old RIGHT mask. nonocc
+    describes only the old left view, so it is dropped."""
+    import numpy as np
+
+    from stereo.data import HorizontalFlip, HorizontalFlipConfig
+
+    flip = HorizontalFlip(HorizontalFlipConfig(probability=1.0), seed=0)
+    left_valid = np.ones((3, 4), np.float32)
+    left_valid[:, 0] = 0
+    right_valid = np.ones((3, 4), np.float32)
+    right_valid[:, 3] = 0
+    sample = {"left": np.zeros((3, 4), np.float32), "right": np.ones((3, 4), np.float32),
+              "disparity_gt": np.full((3, 4), 5.0, np.float32), "valid_gt_mask": left_valid,
+              "disparity_gt_right": np.full((3, 4), 7.0, np.float32),
+              "valid_gt_mask_right": right_valid, "nonocc_mask": left_valid.copy()}
+    out = flip(sample)
+    assert np.array_equal(out["valid_gt_mask"], right_valid[:, ::-1])
+    assert np.array_equal(out["valid_gt_mask_right"], left_valid[:, ::-1])
+    assert "nonocc_mask" not in out
+
+    # Without a right mask, the right label itself says where it is unknown.
+    del sample["valid_gt_mask_right"]
+    sample["disparity_gt_right"][:, 1] = 0.0
+    out = flip(sample)
+    assert float(out["valid_gt_mask"][:, ::-1][:, 1].sum()) == 0.0
+    assert float(out["valid_gt_mask"].sum()) == 9.0

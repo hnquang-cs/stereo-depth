@@ -52,6 +52,11 @@ class DatasetSpec:
     max_samples: Optional[int] = None
     #: Extra keyword arguments forwarded to the dataset class (``split``, ``version``, ...).
     options: Dict[str, Any] = field(default_factory=dict)
+    #: Which side of a train/validation division to take: "all", "train" or "val".
+    #: The same spec with part="train" and part="val" gives two disjoint sets.
+    part: str = "all"
+    #: Share of the dataset on the "val" side (see :func:`holdout_indices`).
+    val_fraction: float = 0.1
 
 
 def build_dataset(spec: DatasetSpec, mode: DatasetMode, transform=None,
@@ -85,6 +90,20 @@ def resolve_container(spec: DatasetSpec) -> DatasetSpec:
     return spec
 
 
+def holdout_indices(dataset, fraction: float) -> List[int]:
+    """The indices on the validation side of a train/validation division.
+
+    A dataset that knows which of its samples share a scene divides by scene
+    (Middlebury does; see ``MiddleburyDataset.holdout_indices``). Anything else
+    gives validation a contiguous block at the end: neighbouring frames of one
+    sequence are nearly the same image, and a block keeps them together.
+    """
+    if hasattr(dataset, "holdout_indices"):
+        return dataset.holdout_indices(fraction)
+    count = min(len(dataset) - 1, max(1, round(len(dataset) * fraction)))
+    return list(range(len(dataset) - count, len(dataset)))
+
+
 def build_training_datasets(specs: Sequence[DatasetSpec], mode: DatasetMode,
                             resize: Optional[ResizeConfig],
                             photometric: Optional[PhotometricAugmentConfig],
@@ -110,6 +129,12 @@ def build_training_datasets(specs: Sequence[DatasetSpec], mode: DatasetMode,
                                       flip=flip if mode is DatasetMode.TRAIN else None,
                                           seed=seed + index)
         dataset = build_dataset(spec, mode, transform, with_labels)
+        if spec.part not in ("all", "train", "val"):
+            raise ValueError(f"part must be 'all', 'train' or 'val', not {spec.part!r}")
+        if spec.part != "all":
+            held = set(holdout_indices(dataset, spec.val_fraction))
+            dataset = Subset(dataset, [i for i in range(len(dataset))
+                                       if (i in held) == (spec.part == "val")])
         if spec.fraction < 1.0:
             keep = max(1, int(round(len(dataset) * spec.fraction)))
             dataset = Subset(dataset, range(keep))
@@ -117,7 +142,8 @@ def build_training_datasets(specs: Sequence[DatasetSpec], mode: DatasetMode,
             dataset = Subset(dataset, range(max(1, spec.max_samples)))
         datasets.append(dataset)
         weights.append(spec.weight)
-        summary.append({"name": spec.type, "root": spec.root, "size": len(dataset), "weight": spec.weight})
+        summary.append({"name": spec.type, "root": spec.root, "size": len(dataset),
+                        "weight": spec.weight, "part": spec.part})
 
     if not datasets:
         raise RuntimeError("no enabled datasets")

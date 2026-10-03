@@ -118,3 +118,21 @@ def test_middlebury_says_what_it_looked_for_when_there_is_no_disparity(tmp_path)
         build_dataset(DatasetSpec(type="middlebury", root=str(tmp_path)),
                       DatasetMode.BENCHMARK, None)
     assert "disp0GT.pfm" in str(error.value)
+
+
+def test_a_spec_divides_into_disjoint_train_and_val_parts(labelled_dataset):
+    """Validation must score only what training never sees. Outside Middlebury
+    the val part is a contiguous block at the end, which keeps a sequence's
+    neighbouring -- nearly identical -- frames on one side."""
+    from stereo.data import DatasetMode
+    from stereo.data.registry import DatasetSpec, build_training_datasets
+
+    def indices(part):
+        spec = DatasetSpec(type="folder", root=labelled_dataset, part=part, val_fraction=1 / 3)
+        dataset, _, _ = build_training_datasets([spec], DatasetMode.VALIDATION, None, None,
+                                                with_labels=True)
+        return [dataset[i]["metadata"]["index"] for i in range(len(dataset))]
+
+    train, val, everything = indices("train"), indices("val"), indices("all")
+    assert sorted(train + val) == everything and not set(train) & set(val)
+    assert val == everything[-len(val):] and len(val) == 2

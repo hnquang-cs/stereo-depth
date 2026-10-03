@@ -416,7 +416,15 @@ class SceneFlowDataset(StereoDataset):
     def _load_ground_truth(self, index: int) -> Dict[str, Any]:
         path = self._disparity_path(self.entries[index], "left")
         disparity, valid = read_middlebury_disparity(path)
-        return {"disparity_gt": disparity, "valid_gt_mask": valid.astype("float32")}
+        ground_truth = {"disparity_gt": disparity, "valid_gt_mask": valid.astype("float32")}
+        # The right view's labels serve only the horizontal flip, which only
+        # training applies.
+        right_path = self._disparity_path(self.entries[index], "right")
+        if self.mode is DatasetMode.TRAIN and os.path.isfile(right_path):
+            right, right_valid = read_middlebury_disparity(right_path)
+            ground_truth["disparity_gt_right"] = right
+            ground_truth["valid_gt_mask_right"] = right_valid.astype("float32")
+        return ground_truth
 
 
 def _pair_views(directory: str, relative: str) -> List[SceneFlowEntry]:

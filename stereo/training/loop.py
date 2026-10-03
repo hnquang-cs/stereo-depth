@@ -97,7 +97,7 @@ class Trainer:
         self.geometric_augment = BatchGeometricAugment(config.data.geometric_augmentation,
                                                        seed=config.training.seed)
 
-        self.train_loader, self.val_loader = self._build_loaders()
+        self.train_loader, self.val_loaders = self._build_loaders()
         steps_per_epoch = self._steps_per_epoch()
         self.total_iterations = steps_per_epoch * config.training.epochs
         self.steps_per_epoch = steps_per_epoch
@@ -139,24 +139,35 @@ class Trainer:
                                     samples_per_epoch=cfg.training.samples_per_epoch,
                                     seed=cfg.training.seed)
 
-        val_loader = None
-        if cfg.data.validation:
-            val_dataset, val_weights, val_summary = build_training_datasets(
-                cfg.data.validation, DatasetMode.VALIDATION, cfg.data.resize, None,
-                seed=cfg.training.seed + 1, with_labels=True)
+        # One loader per dataset, over its held-out part in a fixed order: a
+        # sampled mixture scored different images every epoch, so the number
+        # that picks the checkpoint moved for reasons other than the model.
+        val_loaders = []
+        specs = [spec for spec in cfg.data.validation if spec.enabled]
+        if specs:
             print("validation datasets:")
-            for entry in val_summary:
-                print(f"  {entry['name']:12s} n={entry['size']:7d} root={entry['root']}")
-            # Validation runs for max_validation_steps batches once an epoch, so
-            # its loader does not need the training loader's worker pool. Keeping
-            # them persistent doubled the number of live worker processes -- at
-            # NUM_WORKERS=8 that is 16, each holding a pinned prefetch queue, alive
-            # for the whole run to serve a brief pass.
-            val_loader = build_loader(val_dataset, cfg.training.batch_size, shuffle=False,
-                                      num_workers=min(cfg.training.num_workers, 2),
-                                      sample_weights=val_weights, seed=cfg.training.seed + 1,
-                                      drop_last=False, persistent=False, pin=False)
-        return train_loader, val_loader
+        for index, spec in enumerate(specs):
+            val_dataset, _, _ = build_training_datasets(
+                [spec], DatasetMode.VALIDATION, cfg.data.resize, None,
+                seed=cfg.training.seed + 1, with_labels=True)
+            name = spec.type
+            if any(name == existing for existing, _, _ in val_loaders):
+                name = f"{spec.type}_{index}"
+            if len(val_dataset) == 0:
+                print(f"  {name:12s} nothing held out -- not validated")
+                continue
+            print(f"  {name:12s} n={len(val_dataset):7d} part={spec.part} root={spec.root}")
+            # Validation runs for at most max_validation_steps batches an epoch,
+            # so it does not need the training loader's worker pool. Keeping
+            # them persistent doubled the live worker processes -- at
+            # NUM_WORKERS=8 that is 16, each holding a pinned prefetch queue,
+            # alive for the whole run to serve a brief pass.
+            loader = build_loader(val_dataset, cfg.training.batch_size, shuffle=False,
+                                  num_workers=min(cfg.training.num_workers, 2),
+                                  seed=cfg.training.seed + 1, drop_last=False,
+                                  persistent=False, pin=False)
+            val_loaders.append((name, loader, spec.weight))
+        return train_loader, val_loaders
 
     def _steps_per_epoch(self) -> int:
         steps = len(self.train_loader)
@@ -288,36 +299,45 @@ class Trainer:
         return averages
 
     @torch.no_grad()
-    @torch.no_grad()
     def validate(self, epoch: int) -> Dict[str, float]:
         """Validation metrics, used only to choose a checkpoint.
 
-        Two things this must not do, both of which it used to. It must run under
-        no_grad -- without it every batch builds an autograd graph and holds the
-        activations, for a result whose gradient is never used. And it must be
-        capped: the notebook points validation at the training mixture, so an
-        uncapped pass is a second full epoch over ~94,000 images, which took
-        longer than the training epoch itself and then exhausted memory.
+        Each dataset's held-out part is scored on its own: ``val/<dataset>/<m>``
+        for each, and ``val/<m>`` their mean weighted as in training. Runs under
+        no_grad -- without it every batch builds an autograd graph for a result
+        whose gradient is never used -- and stops after max_validation_steps
+        batches per dataset.
         """
-        if self.val_loader is None:
+        if not self.val_loaders:
             return {}
         self.model.eval()
         limit = self.config.training.max_validation_steps
-        totals: Dict[str, float] = {}
-        count = 0
-        for batch in self.val_loader:
-            if limit is not None and count >= limit:
-                break
-            views = self._prepare(batch, augment=False)
-            outputs = self.model(views["clean_left"], views["clean_right"], directions=("left",))
-            state = ObjectiveState(iteration=self.iteration, epoch=epoch, warmup_scale=1.0)
-            result = self.objective(outputs, {"left": views["clean_left"], "right": views["clean_right"]},
-                                    state, labels=views.get("labels"),
-                                    valid_mask=views.get("valid_mask"))
-            for key, value in result["logs"].items():
-                totals[key] = totals.get(key, 0.0) + value
-            count += 1
-        return {f"val/{key}": value / max(count, 1) for key, value in totals.items()}
+        logs: Dict[str, float] = {}
+        weights: Dict[str, float] = {}
+        for name, loader, weight in self.val_loaders:
+            totals: Dict[str, float] = {}
+            count = 0
+            for batch in loader:
+                if limit is not None and count >= limit:
+                    break
+                views = self._prepare(batch, augment=False)
+                outputs = self.model(views["clean_left"], views["clean_right"], directions=("left",))
+                state = ObjectiveState(iteration=self.iteration, epoch=epoch, warmup_scale=1.0)
+                result = self.objective(outputs, {"left": views["clean_left"], "right": views["clean_right"]},
+                                        state, labels=views.get("labels"),
+                                        valid_mask=views.get("valid_mask"))
+                for key, value in result["logs"].items():
+                    totals[key] = totals.get(key, 0.0) + value
+                count += 1
+            if count:
+                weights[name] = weight
+                logs.update({f"val/{name}/{key}": value / count for key, value in totals.items()})
+
+        for key in {key.split("/", 2)[2] for key in logs}:
+            parts = [(logs[f"val/{name}/{key}"], weight) for name, weight in weights.items()
+                     if f"val/{name}/{key}" in logs]
+            logs[f"val/{key}"] = sum(v * w for v, w in parts) / max(sum(w for _, w in parts), 1e-12)
+        return logs
 
     # -- driver -------------------------------------------------------------- #
 
@@ -344,15 +364,17 @@ class Trainer:
             if cfg.visualize_every and epoch % cfg.visualize_every == 0:
                 self.save_visualization(epoch)
 
-            # Checkpoint selection on a LABEL-FREE criterion only.
+            # Checkpoint selection on held-out data; the training EPE only when
+            # nothing is held out.
             selection = val_logs.get(cfg.selection_metric, train_logs.get("epe"))
             if selection is not None and selection < self.best_metric:
                 self.best_metric = selection
                 save_checkpoint(best_path, self.model, self.optimizer, self.scheduler,
                                 epoch, self.iteration,
                                 extra={"selection_metric": cfg.selection_metric,
-                                       "selection_value": selection,
-                                       "selection_is_label_free": True})
+                                       "selected_on": "validation" if cfg.selection_metric in val_logs
+                                       else "training",
+                                       "selection_value": selection})
                 print(f"  new best by {cfg.selection_metric} = {selection:.5f} -> {best_path}")
 
             with open(os.path.join(cfg.output_dir, "history.json"), "w") as handle:
@@ -367,13 +389,12 @@ class Trainer:
         """Write one row per sample: left, right, predicted disparity, warped right.
 
         The fourth panel is the *reconstruction* -- the right view warped into the
-        left by the predicted disparity. It is what the photometric loss actually
-        compares against the left image, so putting it beside the left view makes
-        the training signal directly readable: where the warp looks like the left
-        image the disparity is right, and where it smears or doubles it is wrong.
+        left by the predicted disparity. Beside the left view it makes the
+        prediction readable: where the warp looks like the left image the
+        disparity is right, and where it smears or doubles it is wrong.
 
-        Drawn from the validation loader when there is one, otherwise the
-        training loader, always from the *clean* (un-jittered) images. Purely a
+        Rows come from the training loader and from each dataset's held-out
+        validation part, always from the *clean* (un-jittered) images. Purely a
         monitoring artefact: no ground truth is involved and nothing here feeds
         back into the objective.
         """
@@ -390,22 +411,26 @@ class Trainer:
         from ..geometry import warp_right_to_left
 
         # Both splits, so the figure shows generalisation and not only fit: rows
-        # from the training loader above rows from the validation loader.
-        sources = [("train", self.train_loader)]
-        if self.val_loader is not None:
-            sources.append(("val", self.val_loader))
+        # from the training loader above held-out rows, which the validation
+        # datasets share between them.
+        per_split = max(self.config.training.visualize_samples, 1)
+        sources = [("train", self.train_loader, per_split)]
+        count = len(self.val_loaders)
+        for position, (name, loader, _) in enumerate(self.val_loaders):
+            rows = per_split // count + (1 if position < per_split % count else 0)
+            if rows:
+                sources.append((f"val {name}", loader, rows))
 
         was_training = self.model.training
         self.model.eval()
         blocks = []
-        per_split = max(self.config.training.visualize_samples, 1)
-        for name, loader in sources:
+        for name, loader, rows in sources:
             try:
                 batch = next(iter(loader))
             except StopIteration:                        # pragma: no cover
                 continue
             views = self._prepare(batch, augment=False)
-            take = min(per_split, views["clean_left"].shape[0])
+            take = min(rows, views["clean_left"].shape[0])
             left = views["clean_left"][:take]
             right = views["clean_right"][:take]
             with torch.no_grad():
@@ -567,7 +592,7 @@ class Trainer:
         if "epe" in logs:
             detail.append(f"epe {logs['epe']:.2f}px")
         if "labelled_ratio" in logs:
-            detail.append(f"labelled {100 * logs['labelled_ratio']:.0f}%")
+            detail.append(f"GT pixels {100 * logs['labelled_ratio']:.0f}%")
         if "refine_delta" in logs:
             detail.append(f"refine{logs['refine_delta']:+.1f}")
         detail.append(f"lr {self.scheduler.get_last_lr()[0]:.1e}")
@@ -586,11 +611,13 @@ class Trainer:
         if "epe" in train_logs:
             detail.append(f"epe {train_logs['epe']:.2f}px")
         if "labelled_ratio" in train_logs:
-            detail.append(f"labelled {100 * train_logs['labelled_ratio']:.0f}%")
+            detail.append(f"GT pixels {100 * train_logs['labelled_ratio']:.0f}%")
         if val_logs:
             detail.append(f"val loss {val_logs.get('val/total', float('nan')):.4f}")
             if "val/epe" in val_logs:
-                detail.append(f"val epe {val_logs['val/epe']:.2f}px")
+                each = ", ".join(f"{name} {val_logs[f'val/{name}/epe']:.2f}"
+                                 for name, _, _ in self.val_loaders if f"val/{name}/epe" in val_logs)
+                detail.append(f"val epe {val_logs['val/epe']:.2f}px ({each})")
         print(f"           {'  '.join(detail)}")
 
     def _check_collapse(self, averages: Dict[str, float]) -> None:

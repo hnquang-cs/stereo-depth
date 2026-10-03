@@ -34,13 +34,14 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 
 #: Keys that may appear in a benchmark sample and must never appear in a training one.
-GROUND_TRUTH_KEYS = ("disparity_gt", "depth_gt", "valid_gt_mask", "disparity_gt_right", "nonocc_mask")
+GROUND_TRUTH_KEYS = ("disparity_gt", "depth_gt", "valid_gt_mask", "disparity_gt_right",
+                     "valid_gt_mask_right", "nonocc_mask")
 
 #: Ground-truth keys that are a LENGTH in pixels, so resizing must rescale their
 #: values, not merely resample them.
 DISPARITY_KEYS = ("disparity_gt", "disparity_gt_right")
 #: Ground-truth keys that are 0/1 and must be resampled with nearest neighbour.
-MASK_KEYS = ("valid_gt_mask", "nonocc_mask")
+MASK_KEYS = ("valid_gt_mask", "valid_gt_mask_right", "nonocc_mask")
 
 
 class DatasetMode(str, Enum):
