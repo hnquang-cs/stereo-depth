@@ -100,3 +100,38 @@ def test_static_quantization_shrinks_the_model():
 
 def test_backend_selection_matches_the_host():
     assert available_backend() in torch.backends.quantized.supported_engines
+
+
+def test_latency_is_timed_at_the_size_the_scored_prediction_runs():
+    """Evaluation resizes to the model's width before running it; timing the
+    network on a 960 x 540 input timed a size no scored prediction runs at."""
+    model = tiny_model()                                  # canonical width 96
+    widths = []
+    original = model.forward
+
+    def recording(left, right, **kwargs):
+        widths.append(left.shape[-1])
+        return original(left, right, **kwargs)
+
+    model.forward = recording
+    measure_latency(model, example_batch(size=(96, 192)), runs=2, warmup=1)
+    assert set(widths) == {96}
+
+
+def test_a_scheme_that_converts_but_cannot_run_is_reported_not_timed(monkeypatch):
+    """Converting is not running: an int8 model can reject quantized tensors in
+    an operation only a forward reaches. Report that, and score nothing with it."""
+    from stereo.evaluation import quantization
+
+    class Broken(torch.nn.Module):
+        canonical_width = 96
+
+        def forward(self, left, right, **kwargs):
+            raise RuntimeError("quantized::cat is not implemented")
+
+    monkeypatch.setattr(quantization, "quantize_static", lambda model, calibration: quantization.QuantizedModel(
+        "static int8", Broken(), 1.0, note="calibrated"))
+    batch = example_batch()
+    static = build_variants(tiny_model(), [batch], batch, runs=1)[-1]
+    assert static.name == "static int8" and static.model is None and static.latency is None
+    assert static.note.startswith("unavailable: converts, but cannot run")

@@ -71,20 +71,29 @@ def model_size_mb(model: nn.Module) -> float:
 
 
 @torch.no_grad()
+@torch.no_grad()
 def measure_latency(model: nn.Module, example: Dict[str, torch.Tensor],
                     runs: int = 10, warmup: int = 3) -> LatencyReport:
-    """Time ``model.forward_left`` on one example.
+    """Time one prediction exactly as evaluation makes it.
+
+    That is :func:`~stereo.model.inference.predict_left_disparity`: the input
+    resized to the width the model was trained at, the network run there, and
+    the disparity scaled back to the input's size. Timing the network on the
+    input as given would time a size it never runs at -- 960 x 540 where the
+    scored prediction runs at 224 wide.
 
     Warm-up runs are discarded: the first forward pays for lazy allocation and
     kernel selection, which a deployed model pays once rather than per frame.
     """
+    from ..model.inference import predict_left_disparity
+
     model.eval()
     for _ in range(warmup):
-        model.forward_left(example["left"], example["right"])
+        predict_left_disparity(model, example["left"], example["right"])
     timings: List[float] = []
     for _ in range(runs):
         start = time.perf_counter()
-        model.forward_left(example["left"], example["right"])
+        predict_left_disparity(model, example["left"], example["right"])
         timings.append((time.perf_counter() - start) * 1000.0)
     timings.sort()
     return LatencyReport(mean_ms=sum(timings) / len(timings),
@@ -120,12 +129,15 @@ class QuantizableStereo(nn.Module):
         self.model = model
         self.dequant = torch.ao.quantization.DeQuantStub()
 
-    def forward_left(self, left: torch.Tensor, right: torch.Tensor) -> Dict[str, torch.Tensor]:
-        output = self.model.forward_left(self.quant(left), self.quant(right))
-        return {**output, "disparity": self.dequant(output["disparity"])}
-
     def forward(self, left: torch.Tensor, right: torch.Tensor, **kwargs):
-        return self.model(left, right, **kwargs)
+        """Every entry point quantizes: evaluation calls ``model(left, right,
+        directions=...)``, and int8 layers given float input fail."""
+        outputs = self.model(self.quant(left), self.quant(right), **kwargs)
+        return {direction: {**output, "disparity": self.dequant(output["disparity"])}
+                for direction, output in outputs.items()}
+
+    def forward_left(self, left: torch.Tensor, right: torch.Tensor) -> Dict[str, torch.Tensor]:
+        return self(left, right, directions=("left",))["left"]
 
     def __getattr__(self, name):
         """Forward num_disparities, scale and friends to the wrapped model."""
@@ -164,12 +176,16 @@ def quantize_static(model: nn.Module, calibration: Iterable[Dict[str, torch.Tens
     prepared.qconfig = torch.ao.quantization.get_default_qconfig(backend)
     torch.ao.quantization.prepare(prepared, inplace=True)
 
+    from ..model.inference import predict_left_disparity
+
     seen = 0
     with torch.no_grad():
         for batch in calibration:
             if seen >= max_batches:
                 break
-            prepared.forward_left(batch["left"], batch["right"])
+            # Through the scored path, so the observers see the activations of
+            # the size the network actually runs at.
+            predict_left_disparity(prepared, batch["left"], batch["right"])
             seen += 1
     if seen == 0:
         raise ValueError("static quantization needs calibration data and got none")
@@ -211,6 +227,9 @@ def build_variants(model: nn.Module, calibration: Iterable[Dict[str, torch.Tenso
             continue                  # timing a stand-in would report the wrong model
         try:
             variant.latency = measure_latency(variant.model, example, runs=runs)
-        except Exception as error:                       # pragma: no cover
-            variant.note = (variant.note + f"; latency unavailable: {error}").strip("; ")
+        except Exception as error:
+            # Converting is not running: an operation the int8 model hands a
+            # quantized tensor it does not accept fails only here.
+            variant.note = f"unavailable: converts, but cannot run ({error})"
+            variant.model = None
     return variants
