@@ -20,6 +20,8 @@ What it writes under ``--out``, and why:
     kitti2015/training              the 200 + 194 frame pairs that have ground
     kitti2012/training              truth (frame _10); the archives' other frames
                                     are unlabelled or the test set
+    flyingthings3d, monkaa, driving the official Scene Flow, when asked for: see
+                                    stereo.data.prepare_sceneflow
     index_cache/                    the array listing of each HDF5 container under
                                     --index-hdf5-under (FlyingThings3D): ten minutes
                                     to build on Kaggle, which a GPU session would
@@ -95,6 +97,9 @@ KITTI_ARCHIVES = {
                   ("data_stereo_flow_calib.zip", ("training/calib/",))),
 }
 KITTI_PAIRS = {"kitti2015": 200, "kitti2012": 194}
+#: Frames in the official release, to flag an incomplete copy (not a failure).
+SCENEFLOW_FRAMES = {("flyingthings3d", "TRAIN"): 22390, ("flyingthings3d", "TEST"): 4370,
+                    ("monkaa", "TRAIN"): 8664, ("driving", "TRAIN"): 4392}
 
 
 # --------------------------------------------------------------------------- #
@@ -420,6 +425,33 @@ def verify(out: str) -> List[str]:
             if not mirrored:
                 problems.append(f"middlebury {release}: no right-view disparity")
 
+    from .prepare_sceneflow import SUBSETS as SCENEFLOW_SUBSETS
+    from .sceneflow import SceneFlowDataset
+
+    for subset in SCENEFLOW_SUBSETS:
+        root = os.path.join(out, subset)
+        if not os.path.isdir(root):
+            continue
+        for split in ("TRAIN", "TEST") if subset == "flyingthings3d" else ("TRAIN",):
+            mode = DatasetMode.BENCHMARK if split == "TEST" else DatasetMode.TRAIN
+            plain = SceneFlowDataset(root, split=split, mode=mode)
+            plain.with_labels = True
+            picks = list(range(0, len(plain), max(1, len(plain) // 6)))[:6]
+            report = check_label_scale([plain[i] for i in picks])
+            flip = None
+            if split == "TRAIN":
+                flipped = SceneFlowDataset(root, split=split, mode=DatasetMode.TRAIN,
+                                           transform=HorizontalFlip(HorizontalFlipConfig(probability=1.0), 0))
+                flipped.with_labels = True
+                flip = check_label_scale([flipped[i] for i in picks])
+            ok = report.consistent and (flip is None or flip.consistent)
+            expected = SCENEFLOW_FRAMES.get((subset, split))
+            print(f"  {subset + ' ' + split:<20} {len(plain):>6} frames   labels x{report.best_factor:g}   "
+                  f"flipped {'x%g' % flip.best_factor if flip else 'n/a'}   {'ok' if ok else 'WRONG'}"
+                  + ("" if expected in (None, len(plain)) else f"   (the release has {expected})"))
+            if not ok:
+                problems.append(f"{subset} {split}: labels look off by x{report.best_factor:g}")
+
     for name, expected in KITTI_PAIRS.items():
         path = os.path.join(out, name)
         if not os.path.isdir(path):
@@ -484,11 +516,14 @@ def find_prepared(search_root: str = "/kaggle/input", max_depth: int = 5) -> Opt
 
 def prepare_all(out: str, cache: Optional[str] = None, max_width: int = 960,
                 middlebury: bool = True, kitti: bool = True, workers: int = 6,
-                keep_cache: bool = False, index_hdf5_under: Optional[str] = None) -> str:
+                keep_cache: bool = False, index_hdf5_under: Optional[str] = None,
+                sceneflow: Sequence[str] = ()) -> str:
     """Download, assemble and check everything; writes the manifest last.
 
     ``index_hdf5_under`` is where to look for HDF5 containers to index (on
-    Kaggle, ``/kaggle/input``), or ``None`` to index none.
+    Kaggle, ``/kaggle/input``), or ``None`` to index none. ``sceneflow`` names
+    the official Scene Flow subsets to stream in (``flyingthings3d``, ``monkaa``,
+    ``driving``): a few hours, against minutes for the rest.
     """
     out = os.path.abspath(out)
     cache = cache or os.path.join(tempfile.gettempdir(), "stereo-prepare-cache")
@@ -501,6 +536,9 @@ def prepare_all(out: str, cache: Optional[str] = None, max_width: int = 960,
         prepare_middlebury(out, os.path.join(cache, "middlebury"), max_width, workers)
     if kitti:
         prepare_kitti(out, os.path.join(cache, "kitti"))
+    if sceneflow:
+        from .prepare_sceneflow import prepare_sceneflow
+        prepare_sceneflow(out, sceneflow, os.path.join(cache, "sceneflow"))
 
     problems = verify(out)
     if problems:
@@ -508,7 +546,7 @@ def prepare_all(out: str, cache: Optional[str] = None, max_width: int = 960,
     indexed = prepare_index(out, index_hdf5_under) if index_hdf5_under else []
 
     contents = {name: round(directory_megabytes(os.path.join(out, name)), 1)
-                for name in ("middlebury", "kitti2015", "kitti2012")
+                for name in ("middlebury", "kitti2015", "kitti2012", "flyingthings3d", "monkaa", "driving")
                 if os.path.isdir(os.path.join(out, name))}
     with open(os.path.join(out, MANIFEST), "w") as handle:
         json.dump({"format": 1, "max_width": max_width, "megabytes": contents,
@@ -535,6 +573,8 @@ def main() -> None:
     parser.add_argument("--keep-cache", action="store_true", help="keep the downloads afterwards")
     parser.add_argument("--index-hdf5-under", help="ship the index of every HDF5 container "
                                                    "under this directory (e.g. /kaggle/input)")
+    parser.add_argument("--sceneflow", nargs="*", default=[],
+                        help="official Scene Flow subsets to stream in: flyingthings3d monkaa driving")
     parser.add_argument("--verify-only", action="store_true",
                         help="check an already prepared --out and exit")
     args = parser.parse_args()
@@ -543,7 +583,8 @@ def main() -> None:
         print("\n" + ("\n".join(problems) if problems else "all checks passed"))
         raise SystemExit(1 if problems else 0)
     prepare_all(args.out, args.cache, args.max_width, not args.skip_middlebury,
-                not args.skip_kitti, args.workers, args.keep_cache, args.index_hdf5_under)
+                not args.skip_kitti, args.workers, args.keep_cache, args.index_hdf5_under,
+                args.sceneflow)
 
 
 if __name__ == "__main__":

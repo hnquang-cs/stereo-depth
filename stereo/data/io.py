@@ -6,6 +6,7 @@ Ground-truth readers live here but are only ever called from a dataset in
 
 from __future__ import annotations
 
+import io
 import os
 import re
 from typing import Dict, Tuple
@@ -56,28 +57,31 @@ def read_pfm(path: str) -> np.ndarray:
     scale factor, which for every disparity file used here is 1.
     """
     with open(path, "rb") as handle:
-        header = handle.readline().rstrip()
-        if header == b"PF":
-            channels = 3
-        elif header == b"Pf":
-            channels = 1
-        else:
-            raise ValueError(f"not a PFM file: {path}")
+        return parse_pfm(handle.read(), path)
 
-        dim_line = handle.readline().decode("latin-1")
-        match = re.match(r"^\s*(\d+)\s+(\d+)\s*$", dim_line)
-        if not match:
-            raise ValueError(f"malformed PFM dimensions in {path}: {dim_line!r}")
-        width, height = int(match.group(1)), int(match.group(2))
 
-        scale = float(handle.readline().rstrip())
-        endian = "<" if scale < 0 else ">"
+def parse_pfm(data: bytes, name: str = "PFM data") -> np.ndarray:
+    """:func:`read_pfm` for bytes already in memory, such as a streamed archive member."""
+    stream = io.BytesIO(data)
+    header = stream.readline().rstrip()
+    if header == b"PF":
+        channels = 3
+    elif header == b"Pf":
+        channels = 1
+    else:
+        raise ValueError(f"not a PFM file: {name}")
 
-        data = np.frombuffer(handle.read(width * height * channels * 4), dtype=endian + "f4")
+    dim_line = stream.readline().decode("latin-1")
+    match = re.match(r"^\s*(\d+)\s+(\d+)\s*$", dim_line)
+    if not match:
+        raise ValueError(f"malformed PFM dimensions in {name}: {dim_line!r}")
+    width, height = int(match.group(1)), int(match.group(2))
 
-    data = data.reshape((height, width, channels) if channels == 3 else (height, width))
-    data = np.flipud(data).astype(np.float32)
-    return np.ascontiguousarray(data)
+    scale = float(stream.readline().rstrip())
+    endian = "<" if scale < 0 else ">"
+    array = np.frombuffer(stream.read(width * height * channels * 4), dtype=endian + "f4")
+    array = array.reshape((height, width, channels) if channels == 3 else (height, width))
+    return np.ascontiguousarray(np.flipud(array).astype(np.float32))
 
 
 def write_pfm(path: str, data: np.ndarray) -> None:

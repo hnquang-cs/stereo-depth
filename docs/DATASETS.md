@@ -11,14 +11,37 @@ quota for as long as it took:
 
 | Dataset | Source | Share | Role |
 |---|---|---|---|
-| FlyingThings3D | `kiraarsene/flying-things-3d` | 65% | **TRAIN split only**; TEST is the paper's Table IV benchmark, held out |
+| FlyingThings3D | the prepared dataset (official), else `kiraarsene/flying-things-3d` | 55% | **TRAIN split only**; TEST is the paper's Table IV benchmark, held out |
+| Monkaa, Driving | the prepared dataset (official) | 5% + 5% | Scene Flow's other two subsets |
 | Middlebury | the prepared dataset | 25% | every release with public ground truth |
 | KITTI 2015, 2012 | the prepared dataset | 5% + 5% | the 200 + 194 labelled training pairs |
 
 ```python
-DATASETS = {"sceneflow": 0.65, "middlebury": 0.25, "kitti2015": 0.05, "kitti2012": 0.05}
+DATASETS = {"sceneflow": 0.55, "monkaa": 0.05, "driving": 0.05,
+            "middlebury": 0.25, "kitti2015": 0.05, "kitti2012": 0.05}
 SCENEFLOW_SPLIT = "TRAIN"     # holds out the paper's evaluation split
 ```
+
+### The official Scene Flow, streamed
+
+The `kiraarsene/flying-things-3d` mirror turned out to hold 1,500 usable FlyingThings3D frames
+(its other 48,900 pairs are augmented copies whose labels fit no scale), squashed to
+224 x 224. The preparation can instead stream the official release from Freiburg
+(`SCENEFLOW = ("flyingthings3d", "monkaa", "driving")`, the default):
+
+| Subset | Frames | Images (finalpass WebP) | Disparity |
+|---|---|---|---|
+| FlyingThings3D | 22,390 train + 4,370 test | 6.1 GB | 93.2 GB |
+| Monkaa | 8,664 | 3.0 GB | 29.9 GB |
+| Driving | 4,392 | 1.0 GB | 9.6 GB |
+
+The disparity is more than a Kaggle session's disk, so the archives are read in byte ranges
+a few hundred MB ahead of the reader, unpacked as they arrive, and every range is deleted
+once read (`stereo/data/prepare_sceneflow.py`). Training frames are halved to 480 x 270 -- an
+exact 2x, so each label is the median of the 2 x 2 block its pixel averages -- and stored as
+WebP and 16-bit PNG disparity; FlyingThings3D's TEST frames stay at 960 x 540. About 13 GB,
+3-4 hours. With it attached, the training notebook uses it in place of the mirror and ignores
+the mirror's label corrections, and the `sceneflow` protocol scores the official TEST split.
 
 ### The prepared dataset (made once)
 

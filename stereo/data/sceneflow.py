@@ -31,6 +31,7 @@ the sign only to pick the byte order, as the format specifies.)
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
@@ -38,6 +39,8 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 from .base import DatasetMode, StereoDataset
 from .discovery import (common_ancestor, describe_missing_stereo, describe_tree,
                         find_view_dir_pairs)
+import cv2
+
 from .io import read_image, read_middlebury_disparity
 
 #: Scene Flow renders with a virtual camera of focal length 1050 px (35 mm lens)
@@ -60,6 +63,13 @@ SPLIT_ALIASES = {
 
 #: How deep to search for an image-pass directory inside an attached dataset.
 MAX_SEARCH_DEPTH = 6
+
+#: Frame extensions: PNG for the official PNG release, WebP for its WebP one.
+FRAME_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")
+#: Written by stereo.data.prepare_sceneflow next to a compact copy: how its PNG
+#: disparity is encoded, and every frame, so no session walks the tree.
+ENCODING_FILE = "disparity_encoding.json"
+INDEX_FILE = "sceneflow_index.json"
 
 
 @dataclass
@@ -378,6 +388,8 @@ class SceneFlowDataset(StereoDataset):
                 "  * exclude these frames from training and pass "
                 "allow_unsplit_benchmark=True, having verified the model never saw them.")
 
+        #: Set for a compact copy, whose disparity is 16-bit PNG rather than PFM.
+        self.encoding = _read_json(os.path.join(self.layout.root, ENCODING_FILE))
         self.entries = self._index()
         if not self.entries:
             raise RuntimeError(f"no Scene Flow frames found:\n{self.layout.describe()}")
@@ -385,6 +397,11 @@ class SceneFlowDataset(StereoDataset):
     # -- indexing ----------------------------------------------------------- #
 
     def _index(self) -> List[SceneFlowEntry]:
+        shipped = _read_json(os.path.join(self.layout.root, INDEX_FILE))
+        if shipped is not None:
+            key = os.path.relpath(self.layout.frames_dir, self.layout.root).replace(os.sep, "/")
+            if key in shipped:
+                return [SceneFlowEntry(relative, name) for relative, name in shipped[key]]
         entries: List[SceneFlowEntry] = []
         for scene in find_scene_dirs(self.layout.frames_dir):
             entries.extend(_pair_views(os.path.join(self.layout.frames_dir, scene), scene))
@@ -395,7 +412,17 @@ class SceneFlowDataset(StereoDataset):
 
     def _disparity_path(self, entry: SceneFlowEntry, view: str) -> str:
         stem = os.path.splitext(entry.filename)[0]
-        return os.path.join(self.layout.disparity_dir, entry.relative, view, stem + ".pfm")
+        suffix = ".png" if self.encoding else ".pfm"
+        return os.path.join(self.layout.disparity_dir, entry.relative, view, stem + suffix)
+
+    def _read_disparity(self, path: str):
+        """``(disparity in pixels, known)``, from a PFM or a compact copy's PNG."""
+        if not self.encoding:
+            return read_middlebury_disparity(path)
+        stored = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+        if stored is None:
+            raise FileNotFoundError(f"could not read disparity: {path}")
+        return stored.astype("float32") / float(self.encoding["divide_by"]), stored > 0
 
     # -- dataset hooks ------------------------------------------------------- #
 
@@ -415,13 +442,13 @@ class SceneFlowDataset(StereoDataset):
 
     def _load_ground_truth(self, index: int) -> Dict[str, Any]:
         path = self._disparity_path(self.entries[index], "left")
-        disparity, valid = read_middlebury_disparity(path)
+        disparity, valid = self._read_disparity(path)
         ground_truth = {"disparity_gt": disparity, "valid_gt_mask": valid.astype("float32")}
         # The right view's labels serve only the horizontal flip, which only
         # training applies.
         right_path = self._disparity_path(self.entries[index], "right")
         if self.mode is DatasetMode.TRAIN and os.path.isfile(right_path):
-            right, right_valid = read_middlebury_disparity(right_path)
+            right, right_valid = self._read_disparity(right_path)
             ground_truth["disparity_gt_right"] = right
             ground_truth["valid_gt_mask_right"] = right_valid.astype("float32")
         return ground_truth
@@ -437,4 +464,12 @@ def _pair_views(directory: str, relative: str) -> List[SceneFlowEntry]:
     except OSError:
         return []
     return [SceneFlowEntry(relative, name) for name in left_names
-            if name.lower().endswith((".png", ".jpg", ".jpeg")) and name in right_names]
+            if name.lower().endswith(FRAME_EXTENSIONS) and name in right_names]
+
+
+def _read_json(path: str):
+    """A JSON file's content, or ``None`` when there is none."""
+    if not os.path.isfile(path):
+        return None
+    with open(path) as handle:
+        return json.load(handle)
