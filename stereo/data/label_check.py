@@ -14,7 +14,9 @@ best gives the factor the labels appear to be off by -- 1.0 when they are right.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+import statistics
+from dataclasses import dataclass, replace
 from typing import Dict, Iterable, Sequence
 
 import torch
@@ -25,6 +27,13 @@ from ..geometry import warp_right_to_left
 #: square from a 4:3 or 16:9 source typically produces.
 DEFAULT_FACTORS = (0.125, 0.25, 0.333, 0.5, 0.667, 1.0, 1.5, 2.0, 3.0, 4.0, 8.0)
 
+#: How far below the scan's median error the best one must sit for a scale to
+#: count as found at all. Measured: 0.53-0.77 on every Middlebury release and on
+#: KITTI, 0.58 on FlyingThings3D frames whose labels were 2x off -- and 0.18 on a
+#: mirror's augmented copies whose labels match no scale. Without this, labels
+#: that fit no scale could still pass, whenever x1 happened to score lowest.
+MIN_CONTRAST = 0.3
+
 
 @dataclass
 class LabelScaleReport:
@@ -32,11 +41,19 @@ class LabelScaleReport:
     best_factor: float
     errors: Dict[float, float]
     pairs_used: int
+    #: How far the best error sits below the median one: how sharply a single
+    #: scale stands out (see MIN_CONTRAST).
+    contrast: float = 1.0
+
+    @property
+    def clear(self) -> bool:
+        """True when one scale fits markedly better than the rest."""
+        return self.contrast >= MIN_CONTRAST
 
     @property
     def consistent(self) -> bool:
-        """True when the labels reconstruct best at their own scale."""
-        return self.best_factor == 1.0
+        """True when the labels clearly reconstruct best at their own scale."""
+        return self.best_factor == 1.0 and self.clear
 
     def __str__(self) -> str:
         ordered = sorted(self.errors.items())
@@ -44,6 +61,11 @@ class LabelScaleReport:
         if self.consistent:
             return (f"disparity labels are consistent with the images "
                     f"({self.pairs_used} pairs)\n    {detail}")
+        if not self.clear:
+            return (f"WARNING: the disparity labels fit the images at NO single scale: the "
+                    f"best,\n    x{self.best_factor:g}, is only {100 * self.contrast:.0f}% below "
+                    f"the typical error. They are wrong\n    in a way no factor corrects. "
+                    f"({self.pairs_used} pairs)  {detail}")
         return (f"WARNING: disparity labels look wrong by a factor of about "
                 f"{self.best_factor:g}.\n"
                 f"    Shifting the right view by label x{self.best_factor:g} reconstructs the left "
@@ -95,7 +117,10 @@ def check_label_scale(pairs: Iterable, factors: Sequence[float] = DEFAULT_FACTOR
               for factor in factors}
     if not any(counts.values()):
         raise ValueError("no labelled pairs with a valid warp region were found")
-    return LabelScaleReport(best_factor=min(errors, key=errors.get), errors=errors, pairs_used=used)
+    finite = [error for error in errors.values() if math.isfinite(error)]
+    median = statistics.median(finite)
+    return LabelScaleReport(best_factor=min(errors, key=errors.get), errors=errors, pairs_used=used,
+                            contrast=1.0 - min(finite) / median if median > 0 else 0.0)
 
 
 @torch.no_grad()
@@ -109,5 +134,9 @@ def measure_label_scale(pairs: Iterable, max_pairs: int = 32) -> LabelScaleRepor
     """
     samples = [sample for _, sample in zip(range(max_pairs), pairs)]
     coarse = check_label_scale(samples, max_pairs=max_pairs)
+    if not coarse.clear:
+        return coarse                     # no scale to refine: the labels fit none
     fine = sorted({round(coarse.best_factor * (1 + step / 100), 4) for step in range(-25, 26)})
-    return check_label_scale(samples, factors=fine, max_pairs=max_pairs)
+    # The fine scan's own contrast is small by construction; clarity is the coarse scan's.
+    return replace(check_label_scale(samples, factors=fine, max_pairs=max_pairs),
+                   contrast=coarse.contrast)

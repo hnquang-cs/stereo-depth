@@ -172,3 +172,31 @@ def test_the_label_scale_is_measured_to_one_percent():
         pairs.append({"left": left, "right": right,
                       "disparity_gt": torch.full((1, 64, 128), 2.1 * shift)})  # 2.1x too large
     assert measure_label_scale(pairs).best_factor == pytest.approx(1 / 2.1, rel=0.015)
+
+
+def test_labels_that_fit_no_scale_never_pass():
+    """A flat error curve means no factor fits: the labels are wrong in a way
+    no correction fixes, even if x1 happens to score lowest. Seen on Kaggle: a
+    mirror's augmented copies scored 0.121-0.162 across every factor."""
+    import cv2
+    import numpy as np
+    import torch
+
+    from stereo.data import check_label_scale, measure_label_scale
+    from stereo.data.label_check import LabelScaleReport
+
+    rng = np.random.default_rng(1)
+    pairs = []
+    for _ in range(3):
+        texture = cv2.GaussianBlur((rng.random((64, 136, 3)) * 255).astype(np.uint8),
+                                   (0, 0), 1.5).astype(np.float32) / 255
+        pairs.append({"left": torch.from_numpy(texture[:, :128]).permute(2, 0, 1),
+                      "right": torch.from_numpy(texture[:, 8:]).permute(2, 0, 1),
+                      "disparity_gt": torch.from_numpy(rng.uniform(0, 30, (1, 64, 128)).astype(np.float32))})
+    report = check_label_scale(pairs)
+    assert not report.clear and not report.consistent
+    assert not measure_label_scale(pairs).clear                   # so no fix is offered
+
+    flat = LabelScaleReport(best_factor=1.0, errors={0.5: 0.150, 1.0: 0.140, 2.0: 0.155},
+                            pairs_used=4, contrast=1 - 0.140 / 0.150)
+    assert not flat.consistent, "x1 scoring lowest on a flat curve must not pass"
