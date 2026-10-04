@@ -49,9 +49,13 @@ class LatencyReport:
 
 @dataclass
 class QuantizedModel:
-    """A model at one precision, with its size and latency."""
+    """A model at one precision, with its size and latency.
+
+    ``model`` is ``None`` when the scheme could not be applied on this host; the
+    note says why. Such a variant is reported, but neither timed nor scored.
+    """
     name: str
-    model: nn.Module
+    model: Optional[nn.Module]
     size_mb: float
     latency: Optional[LatencyReport] = None
     note: str = ""
@@ -193,16 +197,18 @@ def build_variants(model: nn.Module, calibration: Iterable[Dict[str, torch.Tenso
         try:
             variants.append(quantize_dynamic(baseline))
         except Exception as error:                       # pragma: no cover
-            variants.append(QuantizedModel("dynamic int8", baseline, float("nan"),
+            variants.append(QuantizedModel("dynamic int8", None, float("nan"),
                                            note=f"unavailable: {error}"))
     if "static" in wanted:
         try:
             variants.append(quantize_static(baseline, calibration))
         except Exception as error:
-            variants.append(QuantizedModel("static int8", baseline, float("nan"),
+            variants.append(QuantizedModel("static int8", None, float("nan"),
                                            note=f"unavailable: {error}"))
 
     for variant in variants:
+        if variant.model is None:
+            continue                  # timing a stand-in would report the wrong model
         try:
             variant.latency = measure_latency(variant.model, example, runs=runs)
         except Exception as error:                       # pragma: no cover

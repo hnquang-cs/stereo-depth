@@ -70,8 +70,13 @@ def test_build_variants_reports_a_failed_scheme_rather_than_raising():
     names = [variant.name for variant in variants]
     assert names == ["fp32", "dynamic int8", "static int8"]
     for variant in variants:
-        assert variant.latency is not None, f"{variant.name} was not timed"
         assert variant.note, f"{variant.name} should say what it did"
+        if variant.model is None:
+            # Unavailable on this host: reported, but not timed -- timing a
+            # stand-in reported the fp32 model's latency under the int8 name.
+            assert variant.latency is None and variant.note.startswith("unavailable")
+        else:
+            assert variant.latency is not None, f"{variant.name} was not timed"
 
 
 def test_sizes_are_measured_from_the_serialised_weights():
