@@ -608,8 +608,7 @@ class Trainer:
         head = f"ep {epoch} [{step + 1}/{steps}]  loss {logs['total']:.4f}"
         breakdown = self._breakdown(logs)
         detail = [f"d[{logs['disparity_min']:.1f},{logs['disparity_max']:.1f}]"
-                  f" mean {logs['disparity_mean']:.1f}",
-                  f"warp {100 * logs['valid_warp_ratio']:.0f}%"]
+                  f" mean {logs['disparity_mean']:.1f}"]
         if "epe" in logs:
             detail.append(f"epe {logs['epe']:.2f}px")
         if "labelled_ratio" in logs:

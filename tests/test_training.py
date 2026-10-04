@@ -47,6 +47,7 @@ def test_trainer_trains_and_validates_on_disjoint_parts(labelled_dataset, tmp_pa
     config.training.use_amp = False
     config.training.warmup_iterations = 1
     config.training.output_dir = str(tmp_path / "out")
+    config.training.log_every = 1          # the per-iteration log line must run too
     config.optimizer.warmup_iterations = 1
 
     trainer = Trainer(config, device=torch.device("cpu"))
