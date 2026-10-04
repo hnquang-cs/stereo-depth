@@ -188,3 +188,84 @@ def test_published_reference_is_attached_and_labelled():
     assert reference["metrics"]["global_bad_1"] == 10.0
     middlebury = PUBLISHED_RESULTS["middlebury2014_test"]
     assert "caveat" in middlebury and "TEST" in middlebury["caveat"]
+
+
+def test_a_held_out_part_scores_only_those_images(synthetic_benchmark):
+    """part="val" with training's val_fraction is exactly the part it never saw."""
+    model = StereoNet(StereoNetConfig.for_width(96, downsample=4, backbone_width=4,
+                                                feature_channels=4))
+    protocol = get_protocol("custom_folder")
+
+    def scored(part):
+        summary = evaluate_checkpoint(model, protocol, synthetic_benchmark, torch.device("cpu"),
+                                      PostProcessConfig(enabled=False), compute_confidence_metrics=False,
+                                      progress=False, part=part, val_fraction=0.25)
+        return summary, {row["sample_id"] for row in summary["per_image"]}
+
+    held, held_ids = scored("val")
+    kept, kept_ids = scored("train")
+    assert (held["num_images_evaluated"], kept["num_images_evaluated"]) == (1, 3)
+    assert not held_ids & kept_ids
+    assert "part: val" in format_summary(held)
+    with pytest.raises(ValueError, match="part"):
+        scored("test")
+
+
+class _PerfectAtItsWidth(torch.nn.Module):
+    """Answers with the ground truth itself, sampled at the width it runs at."""
+
+    num_disparities, scale, max_disparity = 64, 4, 59
+
+    def __init__(self, truth, canonical_width):
+        super().__init__()
+        self.truth, self.canonical_width = truth, canonical_width
+
+    def num_parameters(self):
+        return 0
+
+    def forward(self, left, right, directions=("left",)):
+        from stereo.geometry import resize_disparity
+        small = resize_disparity(self.truth, tuple(left.shape[-2:]), mode="nearest")
+        return {"left": {"disparity": small, "confidence": torch.ones_like(small)}}
+
+
+@pytest.mark.parametrize("upsample", ["bilinear", "nearest"])
+def test_the_width_floor_is_what_a_perfect_model_at_that_width_scores(tmp_path, upsample):
+    """The floor reported beside a score is the score of a model that is exactly
+    right at its own width: nothing a better model could recover."""
+    root = tmp_path / "step"
+    for name in ("left", "right", "left_disparity"):
+        (root / name).mkdir(parents=True)
+    truth = np.full((64, 96), 10.0, dtype=np.float32)
+    truth[:, 50:] = 30.0                                  # one depth edge
+    cv2.imwrite(str(root / "left" / "0000.png"), np.zeros((64, 96, 3), np.uint8))
+    cv2.imwrite(str(root / "right" / "0000.png"), np.zeros((64, 96, 3), np.uint8))
+    np.savez(str(root / "left_disparity" / "0000.npz"), truth)
+
+    model = _PerfectAtItsWidth(torch.from_numpy(truth)[None, None], canonical_width=24)
+    summary = evaluate_checkpoint(model, get_protocol("custom_folder"), str(root), torch.device("cpu"),
+                                  PostProcessConfig(enabled=False), compute_confidence_metrics=False,
+                                  progress=False, upsample=upsample)
+    floor, scored = summary["resolution_floor"], summary["disparity_metrics"]["all"]
+    assert summary["upsample"] == upsample
+    assert floor["global_epe"] > 0                        # the edge cannot survive 4x
+    assert floor["global_epe"] == pytest.approx(scored["global_epe"])
+    assert floor["global_bad_1"] == pytest.approx(scored["global_bad_1"])
+    assert "Width floor" in format_summary(summary)
+
+
+def test_no_floor_is_claimed_for_sparse_ground_truth(tmp_path):
+    root = tmp_path / "sparse"
+    for name in ("left", "right", "left_disparity"):
+        (root / name).mkdir(parents=True)
+    truth = np.full((64, 96), 10.0, dtype=np.float32)
+    truth[::2] = 0.0                                      # half the rows unknown, as lidar
+    cv2.imwrite(str(root / "left" / "0000.png"), np.zeros((64, 96, 3), np.uint8))
+    cv2.imwrite(str(root / "right" / "0000.png"), np.zeros((64, 96, 3), np.uint8))
+    np.savez(str(root / "left_disparity" / "0000.npz"), truth)
+
+    model = _PerfectAtItsWidth(torch.from_numpy(truth)[None, None], canonical_width=24)
+    summary = evaluate_checkpoint(model, get_protocol("custom_folder"), str(root), torch.device("cpu"),
+                                  PostProcessConfig(enabled=False), compute_confidence_metrics=False,
+                                  progress=False)
+    assert "resolution_floor" not in summary

@@ -32,10 +32,17 @@ from typing import Dict, Optional, Sequence
 import torch
 import torch.nn.functional as F
 
-from ..geometry import RESIZE_ALIGN_CORNERS, resize_disparity
+from ..geometry import RESIZE_ALIGN_CORNERS, resize_disparity, resize_images
 
 #: Smallest height worth feeding the encoder, which downsamples by 16.
 MIN_HEIGHT = 64
+
+#: How the answer is brought back to the input's size. Bilinear blends across
+#: depth edges; nearest keeps them but turns slopes into steps. Measured on 30
+#: FlyingThings3D frames, a perfect 224-px answer scores EPE 1.01 px at 960x540
+#: upsampled bilinearly and 0.84 px with nearest. Which suits a real model is
+#: for held-out data to say.
+UPSAMPLE_MODES = ("bilinear", "nearest")
 
 
 def canonical_size(height: int, width: int, canonical_width: int,
@@ -57,7 +64,8 @@ def canonical_size(height: int, width: int, canonical_width: int,
 def predict_disparity(model, left: torch.Tensor, right: torch.Tensor,
                       canonical_width: Optional[int] = None,
                       preserve_aspect: bool = True,
-                      directions: Optional[Sequence[str]] = None) -> Dict[str, torch.Tensor]:
+                      directions: Optional[Sequence[str]] = None,
+                      upsample: str = "bilinear") -> Dict[str, torch.Tensor]:
     """Predict disparity for a stereo pair of any shape.
 
     The result is at the *input's* resolution and in the *input's* pixels, so it
@@ -72,20 +80,24 @@ def predict_disparity(model, left: torch.Tensor, right: torch.Tensor,
             declared at.
         preserve_aspect: see :func:`canonical_size`.
         directions: which views to predict. ``None`` uses the model's own default.
+        upsample: how the disparity returns to the input's size, one of
+            :data:`UPSAMPLE_MODES`.
 
     Returns:
         ``{direction: {"disparity": (B, 1, H, W), "confidence": (B, 1, H, W)}}``.
     """
     if left.shape != right.shape:
         raise ValueError(f"view shape mismatch: {tuple(left.shape)} vs {tuple(right.shape)}")
+    if upsample not in UPSAMPLE_MODES:
+        raise ValueError(f"upsample must be one of {UPSAMPLE_MODES}, not {upsample!r}")
     height, width = left.shape[-2:]
     target_width = canonical_width or getattr(model, "canonical_width", width)
 
     run_height, run_width = canonical_size(height, width, target_width, preserve_aspect)
     if (run_height, run_width) != (height, width):
-        resize = lambda t: F.interpolate(t, size=(run_height, run_width), mode="bilinear",
-                                         align_corners=RESIZE_ALIGN_CORNERS)
-        left, right = resize(left), resize(right)
+        # Filtered as the training images were (see resize_images).
+        left = resize_images(left, (run_height, run_width))
+        right = resize_images(right, (run_height, run_width))
 
     outputs = model(left, right) if directions is None else model(left, right, directions=directions)
 
@@ -95,7 +107,7 @@ def predict_disparity(model, left: torch.Tensor, right: torch.Tensor,
         if disparity.shape[-2:] != (height, width):
             # resize_disparity rescales the *values* by the width ratio as well
             # as resampling, which is exactly the inverse of the resize above.
-            disparity = resize_disparity(disparity, (height, width))
+            disparity = resize_disparity(disparity, (height, width), mode=upsample)
         entry = {"disparity": disparity}
         if "confidence" in values:
             entry["confidence"] = F.interpolate(values["confidence"], size=(height, width),
@@ -107,7 +119,8 @@ def predict_disparity(model, left: torch.Tensor, right: torch.Tensor,
 @torch.no_grad()
 def predict_left_disparity(model, left: torch.Tensor, right: torch.Tensor,
                            canonical_width: Optional[int] = None,
-                           preserve_aspect: bool = True) -> Dict[str, torch.Tensor]:
+                           preserve_aspect: bool = True,
+                           upsample: str = "bilinear") -> Dict[str, torch.Tensor]:
     """:func:`predict_disparity` for the left view only.
 
     Used by evaluation, which must run the model at the width its search range
@@ -117,4 +130,4 @@ def predict_left_disparity(model, left: torch.Tensor, right: torch.Tensor,
     fraction of the image than it ever saw during training.
     """
     return predict_disparity(model, left, right, canonical_width, preserve_aspect,
-                             directions=("left",))["left"]
+                             directions=("left",), upsample=upsample)["left"]

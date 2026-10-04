@@ -628,6 +628,43 @@ the benchmark image's own pixels, so metrics stay in native pixels while the
 model sees what it was trained on. `test_benchmark_uses_the_canonical_width_path`
 guards against reverting it.
 
+### Training and test images are shrunk alike; what 224 px costs at 960x540
+
+A 224-px model sees FlyingThings3D TEST shrunk 4.3x from 960x540. Evaluation used
+to shrink with plain bilinear, which reads only the 2x2 pixels nearest each output
+centre: at 4.3x it skips most of the image, and fine texture aliases. The training
+frames had been halved with `INTER_AREA` during preparation and then resized only
+2.1x, so the network was scored on images unlike the ones it trained on. Measured
+on 30 real frames (TRAIN/C 0009, 0087 and 0690, the official archives' first
+members), at 224 px:
+
+| images | mean abs Laplacian | photometric error at the true disparity | error 1 px off / at truth |
+|---|---:|---:|---:|
+| training, before (area, then bilinear) | 0.098 | 0.0318 | 1.64x |
+| test, before (bilinear) | 0.121 | 0.0359 | 1.59x |
+| training, now (area, then area) | 0.076 | 0.0286 | 1.68x |
+| test, now (area) | 0.083 | 0.0292 | 1.69x |
+
+Both resizes now area-average whenever they shrink: `ResizeSample` with
+`cv2.INTER_AREA`, and inference with `stereo.geometry.resize_images`, which
+matches it to 2e-7 (`tests/test_image_filtering.py`). Labels keep pixel-centre
+nearest, and the per-batch 0.8-1.2x rescale stays bilinear.
+
+The answer then returns to 960x540. With no model at all, the ground truth taken
+to 224x126 and brought back scores this on the same frames (mask 0 < d < 251):
+
+| upsampling | EPE (px) | > 1 px | > 3 px |
+|---|---:|---:|---:|
+| bilinear | 1.012 | 8.82% | 6.14% |
+| nearest | 0.843 | 3.25% | 2.46% |
+
+So no 224-px model reaches the paper's 0.936 with bilinear upsampling, and any
+error at 224 px grows 4.3x on the way up. Nearest wins here only because the
+answer is perfect; for a real model it also turns slopes into steps. The choice
+is therefore made on held-out data (`evaluate_checkpoint(..., upsample=...,
+part="val")`), which the notebook does before scoring TEST. Every summary on
+dense ground truth reports this floor for its own images (`resolution_floor`).
+
 `compute_num_disparities` and `StereoNetConfig.for_width` are retained -- the
 original specification requires the `min(width // 2, 384)` rule to exist in one
 place, and it is still the right *upper bound* -- but they are no longer the

@@ -21,9 +21,11 @@ from typing import Any, Dict, List, Optional
 import torch
 
 from ..data import DatasetMode, DatasetSpec, build_benchmark_dataset, collate_samples
-from ..geometry import disparity_to_depth
+from ..data.registry import holdout_indices
+from ..geometry import disparity_to_depth, resize_disparity
 from ..model import StereoNet
 from ..model import predict_left_disparity
+from ..model.inference import canonical_size
 from ..postprocess import PostProcessConfig, postprocess_disparity
 from .confidence_metrics import confidence_metrics
 from .depth_metrics import DepthAccumulator, depth_metrics, depth_valid_mask, median_scale_factor
@@ -49,7 +51,9 @@ def evaluate_checkpoint(model: StereoNet,
                         max_samples: Optional[int] = None,
                         compute_confidence_metrics: bool = True,
                         progress: bool = True, disparity_scale: float = 1.0,
-                        options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                        options: Optional[Dict[str, Any]] = None,
+                        upsample: str = "bilinear", part: str = "all",
+                        val_fraction: float = 0.1) -> Dict[str, Any]:
     """Run one protocol against one frozen model.
 
     Args:
@@ -61,6 +65,11 @@ def evaluate_checkpoint(model: StereoNet,
         max_samples: evaluate only the first N images (smoke runs).
         disparity_scale, options: the dataset's label correction and extra loader
             options, the same ones training used (see ``DatasetSpec``).
+        upsample: how the answer returns to each image's size
+            (:data:`stereo.model.inference.UPSAMPLE_MODES`).
+        part, val_fraction: score one side of training's train/validation
+            division ("train" or "val"), or everything ("all"). With the same
+            ``val_fraction`` training used, "val" is exactly its held-out part.
 
     Returns:
         The summary dictionary that :func:`write_results` serialises.
@@ -73,10 +82,19 @@ def evaluate_checkpoint(model: StereoNet,
     dataset = build_benchmark_dataset(spec)
     if dataset.mode is not DatasetMode.BENCHMARK:
         raise RuntimeError("benchmark dataset was not constructed in BENCHMARK mode")
+    if part not in ("all", "train", "val"):
+        raise ValueError(f"part must be 'all', 'train' or 'val', not {part!r}")
+    indices = list(range(len(dataset)))
+    if part != "all":
+        held = set(holdout_indices(dataset, val_fraction))
+        indices = [i for i in indices if (i in held) == (part == "val")]
 
     post_config = postprocess or PostProcessConfig(enabled=protocol.postprocess)
 
     accumulators = {"all": DisparityAccumulator()}
+    # The best any model at this width could score: the ground truth itself,
+    # taken to the width the network runs at and brought back the same way.
+    floor = DisparityAccumulator()
     if protocol.evaluate_nonocc:
         accumulators["nonocc"] = DisparityAccumulator()
     depth_accumulator = DepthAccumulator() if protocol.depth_metrics else None
@@ -84,8 +102,8 @@ def evaluate_checkpoint(model: StereoNet,
     gt_pixels_before_postprocess = 0
     gt_pixels_after_postprocess = 0
 
-    total = len(dataset) if max_samples is None else min(len(dataset), max_samples)
-    for index in range(total):
+    total = len(indices) if max_samples is None else min(len(indices), max_samples)
+    for position, index in enumerate(indices[:total]):
         batch = collate_samples([dataset[index]])
         left = batch["left"].to(device)
         right = batch["right"].to(device)
@@ -94,7 +112,7 @@ def evaluate_checkpoint(model: StereoNet,
         # this image's own pixels. Without this a model trained at a canonical
         # 640 px is scored at the benchmark's native resolution, where its range
         # covers a different fraction of the image than it ever saw.
-        output = predict_left_disparity(model, left, right)
+        output = predict_left_disparity(model, left, right, upsample=upsample)
         disparity = output["disparity"]
         confidence = output["confidence"]
 
@@ -119,6 +137,10 @@ def evaluate_checkpoint(model: StereoNet,
 
         sample_id = str(batch["metadata"].get("sample_id", [index])[0])
         accumulators["all"].update(disparity, disparity_gt, base_valid, sample_id)
+        dense = gt_mask is None or float(gt_mask.float().mean()) >= 0.999
+        if dense:       # a sparse label has no value to carry across its holes
+            floor.update(_resolution_floor(disparity_gt, model, upsample), disparity_gt,
+                         base_valid, sample_id)
 
         if "nonocc" in accumulators:
             nonocc = batch.get("nonocc_mask")
@@ -138,15 +160,18 @@ def evaluate_checkpoint(model: StereoNet,
             if row:
                 confidence_rows.append(row)
 
-        if progress and (index + 1) % 25 == 0:
-            print(f"  [{protocol.name}] {index + 1}/{total}")
+        if progress and (position + 1) % 25 == 0:
+            print(f"  [{protocol.name}] {position + 1}/{total}")
 
     summary: Dict[str, Any] = {
         "protocol": protocol.to_dict(),
         "dataset_root": dataset_root,
         "num_images_evaluated": total,
-        "num_images_available": len(dataset),
+        "num_images_available": len(indices),
+        "part": part if part == "all" else f"{part} (val_fraction={val_fraction:g})",
+        "upsample": upsample,
         "model": {
+            "canonical_width": getattr(model, "canonical_width", None),
             "num_disparities": model.num_disparities,
             "downsample": model.scale,
             "max_disparity_mask_bound_of_model": model.max_disparity,
@@ -172,11 +197,27 @@ def evaluate_checkpoint(model: StereoNet,
         summary["depth_metrics_secondary"] = depth_accumulator.compute()
     if confidence_rows:
         summary["confidence_metrics_secondary"] = _mean_rows(confidence_rows)
+    if floor.pixel_count:
+        summary["resolution_floor"] = floor.compute()
     if protocol.name in PUBLISHED_RESULTS:
         summary["published_reference"] = PUBLISHED_RESULTS[protocol.name]
 
     summary["per_image"] = accumulators["all"].per_image
     return summary
+
+
+def _resolution_floor(disparity_gt: torch.Tensor, model, upsample: str) -> torch.Tensor:
+    """The ground truth through the network's resolution and back.
+
+    Sampled at the network's pixel centres, as training samples its labels,
+    and returned to full size as :func:`predict_left_disparity` returns
+    predictions. A model that answered perfectly at its own width would score
+    exactly this.
+    """
+    height, width = disparity_gt.shape[-2:]
+    run_size = canonical_size(height, width, getattr(model, "canonical_width", None) or width)
+    small = resize_disparity(disparity_gt, run_size, mode="nearest")
+    return resize_disparity(small, (height, width), mode=upsample)
 
 
 def _depth_row(batch, disparity, disparity_gt, valid, protocol, device) -> Dict[str, float]:
@@ -253,8 +294,9 @@ def format_summary(summary: Dict[str, Any]) -> str:
         "=" * 78,
         f"Protocol      : {protocol['name']}  (dataset={protocol['dataset_type']}, split={protocol['split']})",
         f"Dataset root  : {summary['dataset_root']}",
-        f"Images        : {summary['num_images_evaluated']} of {summary['num_images_available']}",
-        "Resolution    : native (no resize)" if not protocol.get("resize")
+        f"Images        : {summary['num_images_evaluated']} of {summary['num_images_available']}"
+        + (f"   (part: {summary['part']})" if summary.get("part", "all") != "all" else ""),
+        "Resolution    : scored at each image's own size" if not protocol.get("resize")
         else f"Resolution    : {protocol['resize']}",
         f"Valid mask    : d_gt > {protocol['min_disparity']}"
         + (f" and d_gt < {protocol['max_disparity']}" if protocol["max_disparity"] else "")
@@ -264,6 +306,16 @@ def format_summary(summary: Dict[str, Any]) -> str:
         + (f"   -- scored on {summary.get('ground_truth_pixel_coverage', 1.0) * 100:.1f}% of the "
            f"ground-truth pixels" if summary['postprocess']['enabled'] else ""),
         f"Scale align   : {'MEDIAN SCALING APPLIED' if summary['median_scaling_applied'] else 'none (metric prediction)'}",
+    ]
+    if summary["model"].get("canonical_width"):
+        lines.append(f"Network       : runs {summary['model']['canonical_width']} px wide; answer upsampled "
+                     f"{summary.get('upsample', 'bilinear')} to each image")
+    if "resolution_floor" in summary:
+        floor = summary["resolution_floor"]
+        lines.append(f"Width floor   : a perfect answer at that width scores EPE={_fmt(floor['global_epe'])} "
+                     f"bad_1={_fmt(floor.get('global_bad_1'))} on {int(floor['num_images'])} of these "
+                     f"images (those with dense ground truth)")
+    lines += [
         "",
         f"PRIMARY METRICS -- {summary['primary_metric_source']}",
     ]

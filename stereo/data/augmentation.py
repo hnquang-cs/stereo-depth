@@ -34,7 +34,7 @@ import cv2
 import numpy as np
 import torch.nn.functional as F
 
-from ..geometry import RESIZE_ALIGN_CORNERS
+from ..geometry import RESIZE_ALIGN_CORNERS, shrinks
 from .base import DISPARITY_KEYS, MASK_KEYS
 
 
@@ -209,6 +209,11 @@ class ResizeSample:
         height = self.target_height(source_height, source_width)
         target = (self.config.width, height)          # cv2 takes (w, h)
         scale_x = self.config.width / max(source_width, 1)
+        # Area-average when shrinking, as stereo.geometry.resize_images does at
+        # test time: bilinear would read only the 2x2 pixels nearest each output
+        # centre and alias, and the two must filter alike.
+        shrinking = shrinks((source_height, source_width), (height, self.config.width))
+        image_interpolation = cv2.INTER_AREA if shrinking else cv2.INTER_LINEAR
 
         out = {}
         for key, value in sample.items():
@@ -223,7 +228,7 @@ class ResizeSample:
             elif key in MASK_KEYS:
                 out[key] = cv2.resize(value, target, interpolation=LABEL_INTERPOLATION)
             else:
-                out[key] = cv2.resize(value, target, interpolation=cv2.INTER_LINEAR)
+                out[key] = cv2.resize(value, target, interpolation=image_interpolation)
         return out
 
 

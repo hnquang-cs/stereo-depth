@@ -138,6 +138,11 @@ checkpoint is chosen by generalisation rather than fit (`VAL_FRACTION` in the no
 Each dataset is scored separately in a fixed order (`val/<dataset>/epe`), and `val/epe`
 -- the checkpoint criterion -- is their mean weighted as in training.
 
+Evaluation mode scores the same held-out part again, with both ways of bringing the 224-px
+answer back to full size (`UPSAMPLE`), so that choice too is made before TEST is touched.
+The prepared FlyingThings3D TRAIN frames are 480x270, so there the answer is upsampled 2.1x,
+against TEST's 4.3x.
+
 ### What the paper evaluates on
 
 | Paper | Evaluation set | Reproducible? |
