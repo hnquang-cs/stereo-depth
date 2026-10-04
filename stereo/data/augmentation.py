@@ -230,6 +230,19 @@ class Compose:
             sample = transform(sample)
         return sample
 
+    def deterministic_prefix(self) -> Tuple[Optional["Compose"], Optional["Compose"]]:
+        """The leading steps that always give the same output, and the rest.
+
+        A dataset can keep a sample after the first part -- decoding and
+        resizing, the expensive steps -- and still draw fresh random
+        augmentation from the second.
+        """
+        cut = 0
+        while cut < len(self.transforms) and isinstance(self.transforms[cut], ResizeSample):
+            cut += 1
+        head, tail = self.transforms[:cut], self.transforms[cut:]
+        return (Compose(head) if head else None), (Compose(tail) if tail else None)
+
 
 def build_train_transform(resize: Optional[ResizeConfig],
                           photometric: Optional[PhotometricAugmentConfig],

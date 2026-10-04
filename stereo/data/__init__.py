@@ -1,5 +1,5 @@
 from .augmentation import HorizontalFlip, HorizontalFlipConfig
-from .label_check import LabelScaleReport, check_label_scale
+from .label_check import LabelScaleReport, check_label_scale, measure_label_scale
 from .augmentation import (BatchGeometricAugment, GeometricAugmentConfig, PhotometricAugment,
                            PhotometricAugmentConfig, ResizeConfig, build_train_transform)
 from .base import (GROUND_TRUTH_KEYS, DatasetMode, StereoDataset, assert_label_free,
@@ -13,7 +13,8 @@ from .registry import (DatasetSpec, build_benchmark_dataset, build_dataset, buil
 from .sceneflow import SceneFlowDataset
 from .stereo_folder import StereoFolderDataset
 
-__all__ = ["HorizontalFlip", "HorizontalFlipConfig", "check_label_scale", "LabelScaleReport", "DatasetMode", "StereoDataset", "assert_label_free", "GROUND_TRUTH_KEYS",
+__all__ = ["HorizontalFlip", "HorizontalFlipConfig", "check_label_scale", "measure_label_scale",
+           "LabelScaleReport", "DatasetMode", "StereoDataset", "assert_label_free", "GROUND_TRUTH_KEYS",
            "collate_samples", "metadata_tensor", "StereoFolderDataset", "SceneFlowDataset",
            "KittiStereoDataset", "MiddleburyDataset", "Eth3dDataset", "Hdf5StereoDataset",
            "inspect_hdf5", "DatasetSpec",

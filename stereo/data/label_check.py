@@ -96,3 +96,18 @@ def check_label_scale(pairs: Iterable, factors: Sequence[float] = DEFAULT_FACTOR
     if not any(counts.values()):
         raise ValueError("no labelled pairs with a valid warp region were found")
     return LabelScaleReport(best_factor=min(errors, key=errors.get), errors=errors, pairs_used=used)
+
+
+@torch.no_grad()
+def measure_label_scale(pairs: Iterable, max_pairs: int = 32) -> LabelScaleReport:
+    """The factor the labels are off by, to about 1%.
+
+    :func:`check_label_scale` says *whether* labels are wrong; correcting them
+    needs the factor itself. A second scan, in 1% steps over +-25% around the
+    coarse best, gives it. Correct a dataset with the result (``disparity_scale``
+    in its ``DatasetSpec``) only when the pairs agree on it.
+    """
+    samples = [sample for _, sample in zip(range(max_pairs), pairs)]
+    coarse = check_label_scale(samples, max_pairs=max_pairs)
+    fine = sorted({round(coarse.best_factor * (1 + step / 100), 4) for step in range(-25, 26)})
+    return check_label_scale(samples, factors=fine, max_pairs=max_pairs)

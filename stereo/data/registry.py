@@ -57,6 +57,14 @@ class DatasetSpec:
     part: str = "all"
     #: Share of the dataset on the "val" side (see :func:`holdout_indices`).
     val_fraction: float = 0.1
+    #: Multiplies every disparity label: the correction for a mirror that resized
+    #: its images without rescaling disparity correctly. Set it only to a factor
+    #: :func:`stereo.data.label_check.measure_label_scale` measured.
+    disparity_scale: float = 1.0
+    #: Keep every sample in memory once decoded and resized; random augmentation
+    #: still runs on each draw. For small sets of large files (Middlebury, KITTI),
+    #: whose decoding otherwise keeps the GPU waiting. Costs memory per worker.
+    cache: bool = False
 
 
 def build_dataset(spec: DatasetSpec, mode: DatasetMode, transform=None,
@@ -74,6 +82,8 @@ def build_dataset(spec: DatasetSpec, mode: DatasetMode, transform=None,
     # Set after construction rather than threaded through six loader signatures,
     # none of which would use it for anything but forwarding.
     dataset.with_labels = bool(with_labels)
+    dataset.disparity_scale = float(spec.disparity_scale)
+    dataset.cache_in_memory = bool(spec.cache)
     return dataset
 
 
@@ -85,7 +95,7 @@ def resolve_container(spec: DatasetSpec) -> DatasetSpec:
     the data, means training and evaluation cannot disagree about it.
     """
     if spec.type == "sceneflow" and spec.root and find_hdf5_files(spec.root, max_depth=2):
-        options = {"split": spec.options["split"]} if "split" in spec.options else {}
+        options = {key: spec.options[key] for key in ("split", "exclude") if key in spec.options}
         return replace(spec, type="hdf5", options=options)
     return spec
 

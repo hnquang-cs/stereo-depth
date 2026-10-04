@@ -245,6 +245,27 @@ class Trainer:
 
     # -- epochs -------------------------------------------------------------- #
 
+    def _apply_gradients(self, loss: torch.Tensor) -> bool:
+        """Backward and an optimizer step, then a schedule step if one was taken.
+
+        GradScaler skips a step whose gradients overflowed -- on the first
+        iterations, while it finds its scale -- and lowers its scale. Stepping
+        the schedule anyway put it ahead of the optimizer, and is what PyTorch
+        warns about as "lr_scheduler.step() before optimizer.step()".
+        """
+        self.optimizer.zero_grad(set_to_none=True)
+        self.scaler.scale(loss).backward()
+        if self.config.optimizer.grad_clip > 0:
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.optimizer.grad_clip)
+        scale = self.scaler.get_scale()
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+        taken = self.scaler.get_scale() >= scale
+        if taken:
+            self.scheduler.step()
+        return taken
+
     def train_epoch(self, epoch: int) -> Dict[str, float]:
         self.model.train()
         cfg = self.config
@@ -252,10 +273,12 @@ class Trainer:
         count = 0
         steps = self._steps_per_epoch()
         started = time.time()
+        waiting, fetched = 0.0, time.time()
 
         for step, batch in enumerate(self.train_loader):
             if step >= steps:
                 break
+            waiting += time.time() - fetched
             views = self._prepare(batch, augment=True)
 
             state = ObjectiveState(
@@ -275,14 +298,8 @@ class Trainer:
                                         valid_mask=views.get("valid_mask"))
                 loss = result["loss"]
 
-            self.optimizer.zero_grad(set_to_none=True)
-            self.scaler.scale(loss).backward()
-            if cfg.optimizer.grad_clip > 0:
-                self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.optimizer.grad_clip)
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-            self.scheduler.step()
+            self._apply_gradients(loss)
+            fetched = time.time()
 
 
             self.iteration += 1
@@ -296,6 +313,9 @@ class Trainer:
         averages = {key: value / max(count, 1) for key, value in totals.items()}
         averages["lr"] = self.scheduler.get_last_lr()[0]
         averages["seconds"] = time.time() - started
+        # Time spent waiting for the loader: high means the CPU, not the GPU, sets
+        # the pace (more workers, smaller files or the in-memory cache help).
+        averages["data_wait"] = waiting / max(averages["seconds"], 1e-9)
         self._check_collapse(averages)
         return averages
 
@@ -609,6 +629,8 @@ class Trainer:
         print(line)
 
         detail = [f"{train_logs['seconds']:.0f}s"]
+        if "data_wait" in train_logs:
+            detail.append(f"waiting for data {100 * train_logs['data_wait']:.0f}%")
         if "epe" in train_logs:
             detail.append(f"epe {train_logs['epe']:.2f}px")
         if "labelled_ratio" in train_logs:

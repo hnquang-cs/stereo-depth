@@ -202,3 +202,22 @@ def test_a_sceneflow_spec_on_a_container_gets_the_hdf5_loader(tmp_path):
     spec = DatasetSpec(type="sceneflow", root=str(tmp_path), options={"split": "TEST"})
     dataset = build_dataset(spec, DatasetMode.TRAIN)
     assert isinstance(dataset, Hdf5StereoDataset) and len(dataset) == 4
+
+
+def test_pairs_can_be_excluded_by_name_and_the_option_survives_resolution(tmp_path):
+    """A mirror's pre-augmented copies ("aug_") can be dropped when they are not
+    usable, also through a "sceneflow" spec resolved to the HDF5 loader."""
+    from stereo.data.registry import DatasetSpec, build_dataset
+
+    (tmp_path / "data").mkdir()
+    arrays = {}
+    for name in ("0006.png", "0007.png", "aug_0013_trans0-40.png"):
+        arrays[f"data/flying/left\\train/0000/{name}"] = images(1)[0]
+        arrays[f"data/flying/right\\train/0000/{name}"] = images(1)[0]
+    write_h5(tmp_path / "data" / "flying.hdf5", arrays)
+
+    everything = build_dataset(DatasetSpec(type="sceneflow", root=str(tmp_path)), DatasetMode.TRAIN)
+    kept = build_dataset(DatasetSpec(type="sceneflow", root=str(tmp_path),
+                                     options={"split": "TRAIN", "exclude": "aug_"}), DatasetMode.TRAIN)
+    assert (len(everything), len(kept)) == (3, 2)
+    assert not any("aug_" in sample_id for sample_id in kept.keyed_ids)

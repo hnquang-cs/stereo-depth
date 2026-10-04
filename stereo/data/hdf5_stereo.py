@@ -28,6 +28,7 @@ invent a pairing it cannot verify.
 from __future__ import annotations
 
 import os
+import re
 from typing import AbstractSet, Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -283,6 +284,9 @@ class Hdf5StereoDataset(StereoDataset):
         left_key / right_key: array names. ``None`` auto-detects.
         disparity_key: ground-truth array, read only in ``BENCHMARK`` mode.
         stacked_key / view_axis: read both views from one array instead.
+        exclude: per-sample containers only -- drop the pairs whose sample id
+            matches this regular expression (``"aug_"`` drops a mirror's
+            pre-augmented copies).
     """
 
     def __init__(self, root: str, mode: DatasetMode = DatasetMode.TRAIN, transform=None,
@@ -290,7 +294,7 @@ class Hdf5StereoDataset(StereoDataset):
                  right_key: Optional[str] = None, disparity_key: Optional[str] = None,
                  stacked_key: Optional[str] = None, view_axis: int = 1,
                  focal_length: Optional[float] = None, baseline: Optional[float] = None,
-                 split: Optional[str] = None, bgr: bool = True):
+                 split: Optional[str] = None, bgr: bool = True, exclude: Optional[str] = None):
         super().__init__(mode=mode, transform=transform, name=name or "hdf5_stereo")
         _require_h5py()   # fail early with a clear message
 
@@ -316,7 +320,7 @@ class Hdf5StereoDataset(StereoDataset):
             detected = detect_view_arrays(arrays)
             if detected is None:
                 # Per-sample arrays, one per image, paired by a marker in the name.
-                detected = self._try_keyed(arrays, split, mode)
+                detected = self._try_keyed(arrays, split, mode, exclude)
             if detected is None:
                 raise RuntimeError(
                     f"could not find a stereo pair inside {self.path}.\n"
@@ -349,7 +353,8 @@ class Hdf5StereoDataset(StereoDataset):
         self.focal_length = focal_length
         self.baseline = baseline
 
-    def _try_keyed(self, arrays, split: Optional[str], mode: DatasetMode):
+    def _try_keyed(self, arrays, split: Optional[str], mode: DatasetMode,
+                   exclude: Optional[str] = None):
         """Detect and index per-sample ("keyed") arrays. Returns a sentinel or None."""
         names = [name for name, _, _ in arrays]
         pairs, marker = detect_keyed_pairs(names)
@@ -372,6 +377,11 @@ class Hdf5StereoDataset(StereoDataset):
                     f"{self.path} has no {split!r} split. Splits present: {available_splits}")
             pairs = [pairs[k] for k in selected]
             ids = [ids[k] for k in selected]
+        if exclude:
+            pattern = re.compile(exclude)
+            kept = [k for k in range(len(ids)) if not pattern.search(ids[k])]
+            pairs = [pairs[k] for k in kept]
+            ids = [ids[k] for k in kept]
 
         self.keyed_pairs = pairs
         self.keyed_ids = ids

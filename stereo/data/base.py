@@ -92,6 +92,11 @@ class StereoDataset(Dataset):
         #: sample without them carries an all-zero ``valid_gt_mask``, which makes
         #: the supervised losses ignore it with no branching anywhere.
         self.with_labels = bool(with_labels)
+        #: Multiplies every disparity label as it is loaded (see DatasetSpec).
+        self.disparity_scale = 1.0
+        #: Keep each sample once decoded and resized (see DatasetSpec.cache).
+        self.cache_in_memory = False
+        self._cache: Dict[int, Dict[str, Any]] = {}
         self.transform = transform
         self.name = name
         if self.mode is DatasetMode.BENCHMARK and transform is not None:
@@ -117,21 +122,25 @@ class StereoDataset(Dataset):
         return self._num_samples()
 
     def __getitem__(self, index: int) -> Dict[str, Any]:
-        left, right = self._load_images(index)
-        sample: Dict[str, Any] = {"left": left, "right": right}
-
-        # Labels are added BEFORE the transform so they are resized and augmented
-        # with the images and stay aligned. BENCHMARK keeps its identity
-        # transform, so there it makes no difference.
         wants_labels = self.mode is DatasetMode.BENCHMARK or self.with_labels
-        if wants_labels:
-            for key, value in self._ground_truth_or_empty(index).items():
-                if key not in GROUND_TRUTH_KEYS:
-                    raise RuntimeError(f"{type(self).__name__} returned unexpected ground-truth key {key!r}")
-                sample[key] = value
+        # With the cache on, the transform's deterministic prefix (the resize)
+        # runs once per sample and its result is kept; the random rest (flip,
+        # colour jitter) runs on every draw.
+        prepare, augment = None, self.transform
+        if self.cache_in_memory and hasattr(self.transform, "deterministic_prefix"):
+            prepare, augment = self.transform.deterministic_prefix()
 
-        if self.transform is not None:
-            sample = self.transform(sample)
+        cached = self._cache.get(index) if self.cache_in_memory else None
+        if cached is None:
+            sample = self._load(index, wants_labels)
+            if prepare is not None:
+                sample = prepare(sample)
+            cached = (sample, self._sample_metadata(index))
+            if self.cache_in_memory:
+                self._cache[index] = cached
+        sample, metadata = cached
+        if augment is not None:
+            sample = augment(dict(sample))
 
         sample = {key: _to_chw_tensor(value) for key, value in sample.items()}
         if self.with_labels and "disparity_gt" in sample and "valid_gt_mask" not in sample:
@@ -139,8 +148,25 @@ class StereoDataset(Dataset):
         if not wants_labels:
             assert_label_free(sample, context=f"{self.name} sample (mode={self.mode.value})")
 
-        sample["metadata"] = {"dataset": self.name, "index": int(index),
-                              **self._sample_metadata(index)}
+        sample["metadata"] = {"dataset": self.name, "index": int(index), **metadata}
+        return sample
+
+    def _load(self, index: int, wants_labels: bool) -> Dict[str, Any]:
+        """The decoded views and, when wanted, the labels -- before any transform."""
+        left, right = self._load_images(index)
+        sample: Dict[str, Any] = {"left": left, "right": right}
+        # Labels are added BEFORE the transform so they are resized and augmented
+        # with the images and stay aligned. BENCHMARK keeps its identity
+        # transform, so there it makes no difference.
+        if wants_labels:
+            for key, value in self._ground_truth_or_empty(index).items():
+                if key not in GROUND_TRUTH_KEYS:
+                    raise RuntimeError(f"{type(self).__name__} returned unexpected ground-truth key {key!r}")
+                sample[key] = value
+            if self.disparity_scale != 1.0:
+                for key in DISPARITY_KEYS:
+                    if key in sample:
+                        sample[key] = sample[key] * self.disparity_scale
         return sample
 
     def _ground_truth_or_empty(self, index: int) -> Dict[str, Any]:

@@ -136,3 +136,39 @@ def test_a_spec_divides_into_disjoint_train_and_val_parts(labelled_dataset):
     train, val, everything = indices("train"), indices("val"), indices("all")
     assert sorted(train + val) == everything and not set(train) & set(val)
     assert val == everything[-len(val):] and len(val) == 2
+
+
+def test_a_measured_label_correction_is_applied_through_the_spec(labelled_dataset):
+    """A mirror whose labels are off by a constant factor is corrected with one
+    explicit number, applied before any resize so the two compose."""
+    from stereo.data import DatasetMode
+    from stereo.data.augmentation import ResizeConfig, build_train_transform
+    from stereo.data.registry import DatasetSpec, build_dataset
+
+    def disparity(scale, transform=None):
+        spec = DatasetSpec(type="folder", root=labelled_dataset, disparity_scale=scale)
+        sample = build_dataset(spec, DatasetMode.TRAIN, transform, with_labels=True)[0]
+        return float(sample["disparity_gt"][sample["valid_gt_mask"] > 0].mean())
+
+    assert disparity(0.5) == pytest.approx(disparity(1.0) * 0.5)
+    resize = build_train_transform(ResizeConfig(width=48, preserve_aspect=True), None)
+    assert disparity(0.5, resize) == pytest.approx(disparity(1.0) * 0.5 * 48 / 96, rel=1e-3)
+
+
+def test_the_label_scale_is_measured_to_one_percent():
+    import cv2
+    import numpy as np
+    import torch
+
+    from stereo.data import measure_label_scale
+
+    rng = np.random.default_rng(0)
+    pairs = []
+    for shift in (6, 8, 10):
+        texture = cv2.GaussianBlur((rng.random((64, 128 + shift, 3)) * 255).astype(np.uint8),
+                                   (0, 0), 1.5).astype(np.float32) / 255
+        left = torch.from_numpy(texture[:, :128]).permute(2, 0, 1)
+        right = torch.from_numpy(texture[:, shift:]).permute(2, 0, 1)
+        pairs.append({"left": left, "right": right,
+                      "disparity_gt": torch.full((1, 64, 128), 2.1 * shift)})  # 2.1x too large
+    assert measure_label_scale(pairs).best_factor == pytest.approx(1 / 2.1, rel=0.015)

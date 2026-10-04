@@ -48,7 +48,8 @@ def evaluate_checkpoint(model: StereoNet,
                         postprocess: Optional[PostProcessConfig] = None,
                         max_samples: Optional[int] = None,
                         compute_confidence_metrics: bool = True,
-                        progress: bool = True) -> Dict[str, Any]:
+                        progress: bool = True, disparity_scale: float = 1.0,
+                        options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Run one protocol against one frozen model.
 
     Args:
@@ -58,13 +59,17 @@ def evaluate_checkpoint(model: StereoNet,
         device: inference device.
         postprocess: post-processing settings; ``None`` uses the protocol's flag.
         max_samples: evaluate only the first N images (smoke runs).
+        disparity_scale, options: the dataset's label correction and extra loader
+            options, the same ones training used (see ``DatasetSpec``).
 
     Returns:
         The summary dictionary that :func:`write_results` serialises.
     """
     model.eval().to(device)
 
-    spec = DatasetSpec(type=protocol.dataset_type, root=dataset_root, options=dict(protocol.dataset_options))
+    spec = DatasetSpec(type=protocol.dataset_type, root=dataset_root,
+                       options={**protocol.dataset_options, **(options or {})},
+                       disparity_scale=disparity_scale)
     dataset = build_benchmark_dataset(spec)
     if dataset.mode is not DatasetMode.BENCHMARK:
         raise RuntimeError("benchmark dataset was not constructed in BENCHMARK mode")

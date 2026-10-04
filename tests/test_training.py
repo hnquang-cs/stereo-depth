@@ -212,3 +212,28 @@ def test_visualisation_handles_train_and_val_at_different_heights(unlabeled_data
     trainer = Trainer(config, device=torch.device("cpu"))
     path = trainer.save_visualization(0)
     assert path is not None and pathlib.Path(path).exists()
+
+
+def test_the_schedule_skips_the_steps_the_gradient_scaler_skips():
+    """Mixed precision skips a step whose gradients overflow -- typically the
+    first, while the scaler finds its scale. Stepping the schedule anyway raised
+    PyTorch's "lr_scheduler.step() before optimizer.step()" warning on Kaggle."""
+    import warnings
+    from types import SimpleNamespace
+
+    from stereo.training.loop import Trainer
+
+    model = torch.nn.Linear(4, 1)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    trainer = SimpleNamespace(
+        model=model, optimizer=optimizer,
+        scheduler=torch.optim.lr_scheduler.LambdaLR(optimizer, lambda i: 1 - i / 100),
+        scaler=torch.amp.GradScaler("cpu", enabled=True),
+        config=SimpleNamespace(optimizer=SimpleNamespace(grad_clip=0.0)))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        taken = [Trainer._apply_gradients(trainer, model(torch.ones(1, 4)).sum() * value)
+                 for value in (float("inf"), 1.0, 1.0)]
+    assert taken == [False, True, True]
+    assert trainer.scheduler.last_epoch == 2
+    assert not [w for w in caught if "lr_scheduler.step()" in str(w.message)]

@@ -83,6 +83,22 @@ FlyingThings3D image tree (`disparity/.../right/*.pfm`). The `kiraarsene/flying-
 HDF5 container has only `disp` (the left view), so its pairs are not flipped; the
 notebook prints, per dataset, whether the flip applies.
 
+### When a mirror's labels are wrong
+
+Every training run checks each dataset's labels by warping before it trains (section 4 of
+the notebook). A dataset that fails is left out of training, and the check measures the
+factor to 1% and prints the correction to set:
+
+```python
+DISPARITY_SCALE = {"sceneflow": 0.5}   # multiplies that dataset's labels
+EXCLUDE         = {"sceneflow": "aug_"}  # drops pairs whose name matches
+```
+
+Pairs whose views are not vertically aligned are reported as `NOT RECTIFIED`: no label
+correction can fix them, so they are dropped instead. Training and evaluation apply the same
+corrections. The `kiraarsene/flying-things-3d` container's labels measured about 2x too
+large for its 224 x 224 images.
+
 ### Validation
 
 Validation scores a held-out part of each training dataset, never trained on, so the

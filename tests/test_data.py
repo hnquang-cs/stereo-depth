@@ -382,3 +382,43 @@ def test_keyed_disparity_lookup_is_constant_time_in_the_number_of_arrays():
     small, large = elapsed(500), elapsed(20_000)
     # 40x the arrays must not cost meaningfully more per lookup.
     assert large < small * 5, f"lookup scales with array count: {small:.4f}s vs {large:.4f}s"
+
+
+def test_the_memory_cache_decodes_once_and_still_augments_every_draw(labelled_dataset):
+    """Middlebury and KITTI are a few hundred large files: decoding and resizing
+    them on every draw kept the GPU waiting on Kaggle. Cached, they are decoded
+    once -- but flip and colour jitter must still be drawn afresh each time."""
+    from stereo.data.augmentation import (HorizontalFlipConfig, PhotometricAugmentConfig,
+                                          ResizeConfig, build_train_transform)
+    from stereo.data.registry import DatasetSpec, build_dataset
+
+    transform = build_train_transform(ResizeConfig(width=48, preserve_aspect=True),
+                                      PhotometricAugmentConfig(enabled=True, probability=1.0),
+                                      seed=0, flip=HorizontalFlipConfig(probability=0.5))
+    dataset = build_dataset(DatasetSpec(type="folder", root=labelled_dataset, cache=True),
+                            DatasetMode.TRAIN, transform, with_labels=True)
+    loads = {"n": 0}
+    original = dataset._load_images
+
+    def counting(index):
+        loads["n"] += 1
+        return original(index)
+
+    dataset._load_images = counting
+    draws = [dataset[0] for _ in range(6)]
+    assert loads["n"] == 1, "a cached sample was decoded again"
+    assert draws[0]["left"].shape[-1] == 48                       # resized before caching
+    assert len({round(float(d["left"].mean()), 6) for d in draws}) > 1, "jitter stopped varying"
+    clean = {round(float(d["left_clean"].sum()), 3) for d in draws}
+    assert len(clean) <= 2                                         # unjittered: as is, or flipped
+
+
+def test_only_the_leading_resize_counts_as_deterministic():
+    from stereo.data.augmentation import (Compose, HorizontalFlip, HorizontalFlipConfig, ResizeConfig,
+                                          ResizeSample)
+
+    resize, flip = ResizeSample(ResizeConfig(width=48)), HorizontalFlip(HorizontalFlipConfig())
+    head, tail = Compose([resize, flip]).deterministic_prefix()
+    assert head.transforms == [resize] and tail.transforms == [flip]
+    head, tail = Compose([flip, resize]).deterministic_prefix()
+    assert head is None and tail.transforms == [flip, resize]
