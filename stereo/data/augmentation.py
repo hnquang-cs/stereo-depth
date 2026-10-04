@@ -75,6 +75,12 @@ class PhotometricAugmentConfig:
     asymmetric_scale: float = 0.05
 
 
+#: Nearest-neighbour that samples pixel centres. Plain INTER_NEAREST rounds
+#: down, which put every resized label about half a target pixel up and left of
+#: its image (measured: -0.50 px for 1242 -> 224, -0.47 px for 960 -> 448), while
+#: the images, resampled with INTER_LINEAR / INTER_AREA, stay centred.
+LABEL_INTERPOLATION = getattr(cv2, "INTER_NEAREST_EXACT", cv2.INTER_NEAREST)
+
 #: Weights that turn RGB into the unweighted channel mean, as a cv2.transform
 #: matrix. Built once: cv2.transform is ~35x faster than ``mean(axis=2)``.
 _CHANNEL_MEAN = np.full((1, 3), 1.0 / 3.0, dtype=np.float32)
@@ -213,9 +219,9 @@ class ResizeSample:
                 # values as well as resample them. Nearest, because averaging
                 # across a depth discontinuity invents a disparity that is true
                 # on neither side of it.
-                out[key] = cv2.resize(value, target, interpolation=cv2.INTER_NEAREST) * scale_x
+                out[key] = cv2.resize(value, target, interpolation=LABEL_INTERPOLATION) * scale_x
             elif key in MASK_KEYS:
-                out[key] = cv2.resize(value, target, interpolation=cv2.INTER_NEAREST)
+                out[key] = cv2.resize(value, target, interpolation=LABEL_INTERPOLATION)
             else:
                 out[key] = cv2.resize(value, target, interpolation=cv2.INTER_LINEAR)
         return out
@@ -328,7 +334,7 @@ class BatchGeometricAugment:
         for key in DISPARITY_KEYS + MASK_KEYS:
             if batch.get(key) is None:
                 continue
-            resized = F.interpolate(batch[key], size=(new_height, new_width), mode="nearest")
+            resized = F.interpolate(batch[key], size=(new_height, new_width), mode="nearest-exact")
             out[key] = resized * (new_width / width) if key in DISPARITY_KEYS else resized
         if out.get("valid_mask") is not None:
             # Resampling a 0/1 mask bilinearly blurs its edge; re-binarise so a

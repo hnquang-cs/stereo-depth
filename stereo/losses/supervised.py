@@ -101,8 +101,9 @@ class NsceLoss(nn.Module):
         size = cost.shape[-2:]
         # Nearest, not bilinear: averaging disparity across a depth discontinuity
         # invents a value that is true nowhere, and the same for the mask.
-        small_target = F.interpolate(target, size=size, mode="nearest") / downsample
-        small_mask = F.interpolate(mask, size=size, mode="nearest")
+        # "nearest-exact" samples pixel centres; plain "nearest" is half a pixel off.
+        small_target = F.interpolate(target, size=size, mode="nearest-exact") / downsample
+        small_mask = F.interpolate(mask, size=size, mode="nearest-exact")
 
         candidates = torch.arange(offset, cost.shape[1] + offset, dtype=cost.dtype,
                                   device=cost.device).view(1, -1, 1, 1)

@@ -167,3 +167,76 @@ def test_horizontal_flip_swaps_the_valid_masks_with_the_labels():
     out = flip(sample)
     assert float(out["valid_gt_mask"][:, ::-1][:, 1].sum()) == 0.0
     assert float(out["valid_gt_mask"].sum()) == 9.0
+
+
+def test_resized_labels_stay_centred_on_their_images():
+    """Plain nearest-neighbour rounds down, which put every resized label about
+    half a target pixel up and left of its image (-0.50 px for KITTI's
+    1242 -> 224). Resampling a map of each pixel's own column shows where each
+    target pixel's label really came from."""
+    import numpy as np
+
+    from stereo.data.augmentation import ResizeConfig, ResizeSample
+
+    for width, target in ((1242, 224), (960, 448), (741, 224)):
+        columns = np.tile(np.arange(width, dtype=np.float32), (8, 1))
+        sample = {"left": np.zeros((8, width, 3), np.float32), "disparity_gt": columns,
+                  "valid_gt_mask": np.ones((8, width), np.float32)}
+        out = ResizeSample(ResizeConfig(width=target, height=8, preserve_aspect=False))(sample)
+        came_from = out["disparity_gt"][0] / (target / width)          # undo the value rescale
+        centres = (np.arange(target) + 0.5) * width / target - 0.5
+        offset = (came_from - centres) * target / width
+        assert abs(float(offset.mean())) < 0.05, (width, target, float(offset.mean()))
+
+
+def test_the_batch_rescale_keeps_labels_centred_too():
+    import torch
+
+    from stereo.data import BatchGeometricAugment, GeometricAugmentConfig
+
+    augment = BatchGeometricAugment(GeometricAugmentConfig(scale=(0.7, 0.7), aspect=(1.0, 1.0),
+                                                           size_divisor=1, min_size=8), seed=0)
+    width = 300
+    columns = torch.arange(width, dtype=torch.float32).view(1, 1, 1, -1).expand(1, 1, 30, width)
+    out, (scale_x, _) = augment({"left": torch.zeros(1, 3, 30, width), "disparity_gt": columns.clone()})
+    target = out["disparity_gt"].shape[-1]
+    came_from = out["disparity_gt"][0, 0, 0] / scale_x
+    centres = (torch.arange(target) + 0.5) * width / target - 0.5
+    assert abs(float(((came_from - centres) * target / width).mean())) < 0.1   # was -0.45 px
+
+
+def test_grids_are_matched_by_padding_not_stretching():
+    import torch
+
+    from stereo.losses.paper_objective import match_grid
+
+    grid = torch.arange(12, dtype=torch.float32).view(1, 1, 3, 4)
+    grown = match_grid(grid, (4, 5))
+    assert torch.equal(grown[..., :3, :4], grid)               # every shared pixel unchanged
+    assert float(grown[..., 3, :].abs().sum() + grown[..., :, 4].abs().sum()) == 0.0
+    assert torch.equal(match_grid(grid, (2, 3)), grid[..., :2, :3])
+
+
+def test_nsce_is_trained_on_the_same_coarse_target_as_the_coarse_loss():
+    """The reference builds both from the max-pooled ground truth; re-shrinking
+    the full-resolution labels by nearest-neighbour for NSCE differed from it."""
+    import torch
+
+    from stereo.losses import PaperObjective
+    from stereo.losses.paper_objective import downsample_disparity
+
+    objective = PaperObjective()
+    seen = {}
+    original = objective.nsce.forward
+
+    def capture(cost, target, mask, downsample):
+        seen.update(target=target, mask=mask, downsample=downsample)
+        return original(cost, target, mask, downsample)
+
+    objective.nsce.forward = capture
+    disparity_gt = torch.rand(2, 1, 32, 64) * 20 + 1
+    outputs = {"disparity": torch.rand(2, 1, 32, 64), "disparity_small": torch.rand(2, 1, 8, 16),
+               "cost": torch.rand(2, 16, 8, 16)}
+    objective(outputs, torch.rand(2, 3, 32, 64), disparity_gt, torch.ones(2, 1, 32, 64), 4)
+    assert seen["downsample"] == 1
+    assert torch.equal(seen["target"], downsample_disparity(disparity_gt, 4))

@@ -38,6 +38,21 @@ from .supervised import NsceLoss
 MIN_VALID_FRACTION = 0.03
 
 
+def match_grid(tensor: torch.Tensor, size) -> torch.Tensor:
+    """Crop, or zero-pad, at the bottom and right to ``size``.
+
+    The model pads its input there (see ``pad_to_multiple``), so the two grids
+    agree on every pixel they share; stretching one onto the other would shift
+    every row and column by a fraction. The padded pixels are zero: unknown.
+    """
+    height, width = size
+    tensor = tensor[..., :height, :width]
+    pad_height, pad_width = height - tensor.shape[-2], width - tensor.shape[-1]
+    if pad_height or pad_width:
+        tensor = F.pad(tensor, (0, pad_width, 0, pad_height))
+    return tensor
+
+
 def downsample_disparity(disparity: torch.Tensor, factor: int) -> torch.Tensor:
     """Ground truth at ``1/factor`` resolution, in that resolution's pixel units.
 
@@ -124,16 +139,10 @@ class PaperObjective(nn.Module):
 
         # -- cost-volume scale: disparity, smoothness, NSCE ------------------ #
         small = outputs["disparity_small"]
-        small_gt = downsample_disparity(disparity_gt, downsample)
-        small_valid = downsample_disparity(valid_gt, downsample) > 0.0
-        # The model pads its input up to a multiple of its size divisor, so the
-        # coarse output can be a pixel or two wider than a plain max-pool of the
-        # ground truth. Match the model's grid; nearest, so no disparity is
-        # invented between two surfaces.
-        if small_gt.shape[-2:] != small.shape[-2:]:
-            small_gt = F.interpolate(small_gt, size=small.shape[-2:], mode="nearest")
-            small_valid = F.interpolate(small_valid.to(small_gt.dtype),
-                                        size=small.shape[-2:], mode="nearest") > 0.5
+        # The reference's coarse ground truth, for both the coarse disparity loss
+        # and NSCE: max-pooled to the cost volume's grid, in its pixel units.
+        small_gt = match_grid(downsample_disparity(disparity_gt, downsample), small.shape[-2:])
+        small_valid = match_grid(downsample_disparity(valid_gt, downsample), small.shape[-2:]) > 0.0
 
         loss, _ = self.disparity_loss(small, small_gt, small_valid.to(small.dtype))
         contribution = self.weights.disparity * loss
@@ -150,7 +159,7 @@ class PaperObjective(nn.Module):
             parts["smooth"] = float(contribution.detach())
 
         if self.weights.nsce > 0.0 and "cost" in outputs:
-            terms = self.nsce(outputs["cost"], disparity_gt, valid_gt.to(small.dtype), downsample)
+            terms = self.nsce(outputs["cost"], small_gt, small_valid.to(small.dtype), 1)
             contribution = self.weights.nsce * terms["loss"]
             total = total + contribution
             parts["nsce"] = float(contribution.detach())

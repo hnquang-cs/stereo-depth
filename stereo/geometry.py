@@ -236,7 +236,7 @@ def resize_disparity(disparity: torch.Tensor, size: Tuple[int, int], mode: str =
     _, _, _, old_width = disparity.shape
     new_height, new_width = size
     if mode == "nearest":
-        resized = F.interpolate(disparity, size=size, mode="nearest")
+        resized = F.interpolate(disparity, size=size, mode="nearest-exact")   # pixel centres
     else:
         resized = F.interpolate(disparity, size=size, mode=mode, align_corners=align_corners)
     return scale_disparity(resized, resize_scale_x(old_width, new_width, align_corners))
