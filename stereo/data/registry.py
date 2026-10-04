@@ -43,6 +43,8 @@ class DatasetSpec:
     """One entry of a training mixture."""
     type: str = "folder"
     root: str = ""
+    #: What logs and validation scores call it; the type (plus version) when empty.
+    name: str = ""
     enabled: bool = True
     weight: float = 1.0
     #: Keep only the first ``fraction`` of the dataset (useful for quick runs).
@@ -101,8 +103,8 @@ def resolve_container(spec: DatasetSpec) -> DatasetSpec:
 
 
 def spec_name(spec: DatasetSpec) -> str:
-    """A short name for logs: the type, plus the version where there is one (kitti2015)."""
-    return f"{spec.type}{spec.options.get('version', '')}"
+    """A short name for logs: the spec's own, else the type plus any version (kitti2015)."""
+    return spec.name or f"{spec.type}{spec.options.get('version', '')}"
 
 
 def holdout_indices(dataset, fraction: float) -> List[int]:
