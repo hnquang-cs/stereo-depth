@@ -238,3 +238,76 @@ def test_restoring_brings_back_visualisations_and_config_too(tmp_path):
     assert (destination / "config.yaml").read_text() == "model: {}"
     assert (destination / "visualizations" / "epoch_0000.png").read_text() == "png"
     assert (destination / "history.json").read_text() == '[{"epoch": 0}]'
+
+
+# --------------------------------------------------------------------------- #
+# Across Kaggle sessions
+# --------------------------------------------------------------------------- #
+
+def _notebook_output(root, run_files=("last.pt", "best.pt", "history.json"), archive=True):
+    """An earlier version's output as it is attached: the code clone beside
+    outputs/train, which holds the run's files and its archive."""
+    run = root / "outputs" / "train"
+    (run / "visualizations").mkdir(parents=True)
+    (root / "stereo-depth" / "stereo").mkdir(parents=True)
+    (root / "stereo-depth" / "stereo" / "model.py").write_text("code")
+    for name in run_files:
+        (run / name).write_text(name)
+    (run / "config.yaml").write_text("model: {}")
+    (run / "visualizations" / "epoch_0000.png").write_text("png")
+    if archive:
+        package_run(str(run))
+    return run
+
+
+def test_an_attached_notebook_output_folder_restores_the_run(tmp_path):
+    """Attaching the previous version's output is the way to continue without
+    Drive. Kaggle may unpack the archive in it, so a folder must work."""
+    _notebook_output(tmp_path / "input" / "stereo-training")
+    destination = tmp_path / "working" / "outputs" / "train"
+
+    found = restore_run(str(tmp_path / "input" / "stereo-training"), str(destination))
+
+    assert set(found) == {"last.pt", "best.pt", "history.json"}
+    assert (destination / "last.pt").read_text() == "last.pt"
+    assert (destination / "visualizations" / "epoch_0000.png").read_text() == "png"
+    assert not (destination / "stereo-depth").exists()          # not the code clone
+    assert not (destination / "run_artifacts.zip").exists()     # not the old archive
+
+
+def test_a_folder_holding_only_the_archive_restores_from_it(tmp_path):
+    run = _notebook_output(tmp_path / "input" / "stereo-training")
+    for name in ("last.pt", "best.pt", "history.json"):
+        (run / name).unlink()
+
+    found = restore_run(str(tmp_path / "input" / "stereo-training"), str(tmp_path / "out"))
+    assert set(found) == {"last.pt", "best.pt", "history.json"}
+
+
+def test_a_folder_without_a_run_says_so(tmp_path):
+    (tmp_path / "input" / "data").mkdir(parents=True)
+    with pytest.raises(FileNotFoundError, match="holds none"):
+        restore_run(str(tmp_path / "input"), str(tmp_path / "out"))
+
+
+def test_a_session_time_limit_stops_after_a_whole_epoch_and_the_next_session_continues(dataset, tmp_path):
+    """Kaggle ends a session at its time limit. The run must stop before that,
+    with last.pt written, and the next session must carry on from it."""
+    import time
+
+    first = str(tmp_path / "session1")
+    trainer = Trainer(make_config(dataset, first, epochs=4), device=torch.device("cpu"))
+    trainer.fit(stop_at=time.time())                # no time for a second epoch
+    assert trainer.stopped_early
+    assert [r["epoch"] for r in trainer.history] == [0]
+    assert os.path.isfile(os.path.join(first, "last.pt"))
+
+    second = str(tmp_path / "session2")
+    restored = restore_run(first, second)           # the first session's output folder
+    config = make_config(dataset, second, epochs=4)
+    config.training.resume = restored["last.pt"]
+    resumed = Trainer(config, device=torch.device("cpu"))
+    assert resumed.start_epoch == 1
+    resumed.fit(stop_at=time.time() + 3600)
+    assert not resumed.stopped_early
+    assert [r["epoch"] for r in resumed.history] == [0, 1, 2, 3]

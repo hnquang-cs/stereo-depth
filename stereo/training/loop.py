@@ -116,6 +116,8 @@ class Trainer:
         self.iteration = 0
         self.start_epoch = 0
         self.best_metric = float("inf")
+        #: Whether fit() stopped at its time limit with epochs still to train.
+        self.stopped_early = False
         self.history: List[Dict[str, Any]] = []
         os.makedirs(config.training.output_dir, exist_ok=True)
 
@@ -362,7 +364,15 @@ class Trainer:
 
     # -- driver -------------------------------------------------------------- #
 
-    def fit(self) -> str:
+    def fit(self, stop_at: Optional[float] = None) -> str:
+        """Train from ``start_epoch`` to the configured number of epochs.
+
+        Args:
+            stop_at: a ``time.time()`` this session must finish by. Training stops
+                after the last epoch sure to end before it, judged by the longest
+                epoch so far, with every checkpoint written. A Kaggle session then
+                ends with ``last.pt`` saved, rather than being killed mid-epoch.
+        """
         cfg = self.config.training
         print(f"device={self.device}  parameters={self.model.num_parameters():,}  "
               f"num_disparities={self.model.num_disparities} (downsample={self.model.scale})")
@@ -370,8 +380,14 @@ class Trainer:
 
         last_path = os.path.join(cfg.output_dir, "last.pt")
         best_path = os.path.join(cfg.output_dir, "best.pt")
+        if self.start_epoch >= cfg.epochs:
+            print(f"nothing to train: this run already finished its {cfg.epochs} epochs. "
+                  f"Raise the number of epochs to train it longer.")
 
+        self.stopped_early = False
+        longest = 0.0
         for epoch in range(self.start_epoch, cfg.epochs):
+            started = time.time()
             train_logs = self.train_epoch(epoch)
             val_logs = self.validate(epoch)
             record = {"epoch": epoch, **{f"train/{k}": v for k, v in train_logs.items()}, **val_logs}
@@ -400,6 +416,14 @@ class Trainer:
 
             with open(os.path.join(cfg.output_dir, "history.json"), "w") as handle:
                 json.dump(self.history, handle, indent=2)
+
+            longest = max(longest, time.time() - started)
+            if stop_at is not None and epoch + 1 < cfg.epochs and time.time() + longest > stop_at:
+                self.stopped_early = True
+                print(f"\nstopping after epoch {epoch}: one more (~{longest / 60:.0f} min) would run past "
+                      f"this session's time limit. {cfg.epochs - epoch - 1} of {cfg.epochs} epochs remain; "
+                      f"last.pt continues them.")
+                break
 
         return best_path if os.path.exists(best_path) else last_path
 

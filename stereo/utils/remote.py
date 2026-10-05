@@ -164,13 +164,25 @@ def extract(archive_path: str, directory: str) -> List[str]:
 def restore_run(source: str, output_dir: str, workspace: Optional[str] = None) -> Dict[str, str]:
     """Fetch and unpack a previous run's checkpoints into ``output_dir``.
 
-    The archive's internal layout does not matter: the run files are located
-    wherever they sit inside it and copied to the top of ``output_dir``, which is
-    where the trainer looks.
+    ``source`` is a run archive (a local path, a Drive link or a URL) or a
+    folder holding a run -- such as an earlier version's notebook output
+    attached as an input, which Kaggle may have unpacked. The archive's internal
+    layout does not matter: the run files are located wherever they sit inside
+    it and copied to the top of ``output_dir``, which is where the trainer looks.
 
     Returns ``{filename: path}`` for each run file found.
     """
     os.makedirs(output_dir, exist_ok=True)
+    if os.path.isdir(source):
+        run_dir = _find_run_directory(source)
+        if run_dir is not None:
+            return _copy_run(run_dir, output_dir)
+        archives = sorted((os.path.join(d, f) for d, _, fs in os.walk(source) for f in fs
+                           if f == ARCHIVE_NAME), key=_run_preference)
+        if archives:
+            return restore_run(archives[0], output_dir, workspace)
+        raise FileNotFoundError(f"{source} holds none of {RUN_FILES} and no {ARCHIVE_NAME}")
+
     workspace = workspace or os.path.join(output_dir, "_restore")
     if os.path.isdir(workspace):
         shutil.rmtree(workspace)
@@ -179,9 +191,32 @@ def restore_run(source: str, output_dir: str, workspace: Optional[str] = None) -
     archive_path = os.path.join(workspace, "checkpoints_archive")
     download(source, archive_path)
     extract(archive_path, workspace)
+    try:
+        return _copy_run(workspace, output_dir)
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
 
+
+def _run_preference(path: str):
+    """Sort key among several runs in one output: training's first, then the shallowest."""
+    parts = os.path.normpath(path).split(os.sep)
+    return ("train" not in parts, len(parts), path)
+
+
+def _find_run_directory(root: str) -> Optional[str]:
+    """The folder under ``root`` holding a run's checkpoints, preferring one with last.pt."""
+    candidates = [directory for directory, _, filenames in os.walk(root)
+                  if "last.pt" in filenames or "best.pt" in filenames]
+    if not candidates:
+        return None
+    with_last = [d for d in candidates if os.path.isfile(os.path.join(d, "last.pt"))]
+    return sorted(with_last or candidates, key=_run_preference)[0]
+
+
+def _copy_run(root: str, output_dir: str) -> Dict[str, str]:
+    """Copy the run files under ``root`` to the top of ``output_dir``, the rest below it."""
     found: Dict[str, str] = {}
-    for directory, _, filenames in os.walk(workspace):
+    for directory, _, filenames in os.walk(root):
         for filename in filenames:
             if filename in RUN_FILES and filename not in found:
                 source_path = os.path.join(directory, filename)
@@ -193,12 +228,12 @@ def restore_run(source: str, output_dir: str, workspace: Optional[str] = None) -
     # Everything that is not a run file is restored too, keeping its relative
     # layout, so visualisations and the resolved config survive a resume rather
     # than only the checkpoints.
-    for directory, _, filenames in os.walk(workspace):
+    for directory, _, filenames in os.walk(root):
         for filename in filenames:
-            if filename in RUN_FILES or filename == "checkpoints_archive":
+            if filename in RUN_FILES or filename in PACKAGE_EXCLUDE or filename == "checkpoints_archive":
                 continue
             source_path = os.path.join(directory, filename)
-            relative = os.path.relpath(source_path, workspace)
+            relative = os.path.relpath(source_path, root)
             target = os.path.join(output_dir, relative)
             if os.path.abspath(source_path) == os.path.abspath(target):
                 continue
@@ -209,10 +244,8 @@ def restore_run(source: str, output_dir: str, workspace: Optional[str] = None) -
         raise FileNotFoundError(
             f"the archive contains none of {RUN_FILES}.\n"
             f"What it does contain:\n  "
-            + "\n  ".join(sorted(os.path.relpath(os.path.join(d, f), workspace)
-                                 for d, _, fs in os.walk(workspace) for f in fs)[:25]))
-
-    shutil.rmtree(workspace, ignore_errors=True)
+            + "\n  ".join(sorted(os.path.relpath(os.path.join(d, f), root)
+                                 for d, _, fs in os.walk(root) for f in fs)[:25]))
     return found
 
 
