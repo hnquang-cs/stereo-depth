@@ -451,7 +451,7 @@ class Trainer:
         if not HAVE_MATPLOTLIB:
             print("  visualisation skipped: matplotlib is not installed")
             return None
-        import matplotlib.pyplot as plt
+        from matplotlib.figure import Figure      # not pyplot: see stereo.utils.visualization
 
         from ..geometry import warp_right_to_left
 
@@ -519,7 +519,7 @@ class Trainer:
         width = entries[0][0]["left"].shape[-1]
         panel_w = 4.6
         figure_heights = [panel_w * r / max(width, 1) for r in heights]
-        fig = plt.figure(figsize=(4 * panel_w, sum(figure_heights) + 0.75), facecolor="white")
+        fig = Figure(figsize=(4 * panel_w, sum(figure_heights) + 0.75), facecolor="white")
         grid = fig.add_gridspec(len(entries), 4, height_ratios=figure_heights,
                                 wspace=0.03, hspace=0.12)
 
@@ -581,7 +581,6 @@ class Trainer:
             f"valid warp {warp * 100:.0f}%",
             fontsize=13, color="#222222", y=0.995)
         fig.savefig(path, dpi=110, bbox_inches="tight", facecolor="white")
-        plt.close(fig)
         print(f"  visualisation -> {path}")
         return path
 

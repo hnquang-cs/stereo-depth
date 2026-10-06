@@ -302,31 +302,28 @@ reference numbers, and what could and could not be reproduced here.
 
 ## Kaggle
 
-`notebooks/kaggle_training.ipynb` runs with `MODE = "train_unlabeled"`,
-`"adapt_unlabeled"` or `"evaluate"`. Ground truth is loaded **only** when
-`MODE == "evaluate"`.
+`notebooks/kaggle_training.ipynb` has three modes, set by `MODE` in its first cell:
 
-Every setting lives in a single documented **Control Panel** cell; the rest of the notebook
-derives from it, so adding a dataset or switching to evaluation is a one-line edit. A
-preflight cell then prints what your settings actually mean (disparity reach in pixels, cost
-volume memory, which data will be downloaded) and warns about inconsistencies before anything
-runs.
+| `MODE` | what it does |
+|---|---|
+| `train` | trains, or continues a run from `CHECKPOINT_URL`; once every epoch is done, draws the training curves, evaluates the model (the paper's FlyingThings3D TEST by default), quantizes it and compares it with the paper |
+| `adapt` | fine-tunes a checkpoint on your own data |
+| `eval` | the evaluation half of `train`, for the checkpoint at `CHECKPOINT_URL` |
 
-Large datasets are **attached, not downloaded** — Scene Flow is 132 GB against Kaggle's 20 GB
-quota:
+The data is one dataset, prepared once on a CPU session by `notebooks/prepare_data.ipynb`
+(Middlebury, KITTI 2012 and 2015, and the official Scene Flow). Attach it and the notebook
+finds it by its manifest; see [docs/DATASETS.md](docs/DATASETS.md).
 
-```python
-DATASETS = {"sceneflow": 1.0}
-ATTACHED = {"sceneflow": "/kaggle/input/sceneflow"}
-```
-
-The mirror's internal folder layout is discovered automatically (official or
-`FlyingThings3D_subset`, at any nesting depth); see [docs/DATASETS.md](docs/DATASETS.md).
+A run longer than one session stops after the last epoch that fits in `SESSION_HOURS` and
+saves itself; attach that version's output and point `CHECKPOINT_URL` at it to continue.
+Each run saves `run_artifacts.zip`: the checkpoints, `history.json`, the per-epoch
+visualisations and `training_curves.png`, and once evaluated `summary.json`, `per_image.csv`,
+`evaluation_results.png` and `evaluation_predictions.png`.
 
 ## Tests
 
 ```bash
-python -m pytest tests/ -q          # 109 tests
+python -m pytest tests/ -q          # 307 tests
 ```
 
 Covers: disparity sign conventions (including an assertion that the *wrong* warp
